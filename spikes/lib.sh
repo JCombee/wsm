@@ -60,6 +60,26 @@ as_user() {
 		"$@")
 }
 
+# gen_password prints a random alphanumeric password. Never log its output.
+gen_password() {
+	local pw=''
+	while ((${#pw} < 32)); do
+		pw+=$(head -c 48 /dev/urandom | base64 | tr -dc 'A-Za-z0-9')
+	done
+	printf '%s' "${pw:0:32}"
+}
+
+# ensure_cgroup_delegation makes systemd delegate the cpu, io, memory and pids
+# controllers to user managers, so rootless Podman can apply --cpus, --memory
+# and --pids-limit. Call it before the first user manager starts.
+ensure_cgroup_delegation() {
+	local dropin=/etc/systemd/system/user@.service.d/wsm-delegate.conf
+	[[ -e $dropin ]] && return 0
+	mkdir -p "$(dirname "$dropin")" || return 1
+	printf '[Service]\nDelegate=cpu cpuset io memory pids\n' >"$dropin" || return 1
+	systemctl daemon-reload
+}
+
 # ensure_rootless_user <name> [uid] creates a user with subordinate IDs and
 # linger, then waits until its systemd user instance is up.
 ensure_rootless_user() {

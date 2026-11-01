@@ -21,9 +21,10 @@ exists (exit 3) and they run as root (exit 4).
 - Outbound internet access (apt, `docker.io`, `proxy.golang.org`).
 - No shared folders or other mounts from your workstation.
 
-Any hypervisor works (libvirt/virt-manager, Proxmox, a cloud VM). A local VM
-is preferred: on a cloud VM the metadata test targets the real metadata
-service.
+Any hypervisor works (libvirt/virt-manager, Proxmox) and so does a cloud VM;
+both are fine. On a cloud VM the metadata address is real, so `NET-METADATA`
+proves the metadata service is unreachable. On a local VM nothing listens
+there, so `NET-METADATA` only proves that the rule blocks the address.
 
 ## 2. Copy the spikes to the VM
 

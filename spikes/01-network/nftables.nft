@@ -1,0 +1,66 @@
+#!/usr/sbin/nft -f
+# Spike 01: egress filter for the project UID range (docs/plan/bouwplan-fase-1.md,
+# section 3.3). Rootless pods use pasta, so a sandbox's outbound traffic
+# leaves the host from sockets owned by the project user; meta skuid sees it.
+#
+# run.sh fills the sets at runtime:
+#   dns4/dns6    the host resolvers from /etc/resolv.conf
+#   svc_allow4   uid . address . port, one element per service_enable
+#
+# Every block rule has a named counter, so a test can tell "blocked by this
+# rule" apart from "nothing listening".
+
+table inet wsm
+delete table inet wsm
+
+table inet wsm {
+	counter dns_allowed {}
+	counter mcp_allowed {}
+	counter svc_allowed {}
+	counter loopback_blocked {}
+	counter wsm0_blocked {}
+	counter lan_blocked {}
+	counter linklocal_blocked {}
+
+	set dns4 {
+		type ipv4_addr
+	}
+
+	set dns6 {
+		type ipv6_addr
+	}
+
+	set svc_allow4 {
+		typeof meta skuid . ip daddr . tcp dport
+	}
+
+	chain output {
+		type filter hook output priority filter; policy accept;
+
+		meta skuid != 50000-59999 accept
+
+		# Replies on connections someone else opened, e.g. the manager
+		# connecting to a preview port that pasta publishes on 127.0.0.1.
+		ct state established,related accept
+
+		# 1. Always allowed: the host resolver and the MCP server.
+		ip daddr @dns4 meta l4proto { tcp, udp } th dport 53 counter name dns_allowed accept
+		ip6 daddr @dns6 meta l4proto { tcp, udp } th dport 53 counter name dns_allowed accept
+		ip daddr 10.255.0.1 tcp dport 7443 counter name mcp_allowed accept
+
+		# 2. Allowed per project after service_enable.
+		meta skuid . ip daddr . tcp dport @svc_allow4 counter name svc_allowed accept
+
+		# 3. Blocked for the whole project UID range. wsm0 comes before 10/8
+		# only so its counter is separate.
+		ip daddr 127.0.0.0/8 counter name loopback_blocked reject
+		ip6 daddr ::1 counter name loopback_blocked reject
+		ip daddr 10.255.0.1 counter name wsm0_blocked reject
+		ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 100.64.0.0/10 } counter name lan_blocked reject
+		ip6 daddr fc00::/7 counter name lan_blocked reject
+		ip daddr 169.254.0.0/16 counter name linklocal_blocked reject
+		ip6 daddr fe80::/10 counter name linklocal_blocked reject
+
+		# 4. Everything else (internet) stays open: policy accept.
+	}
+}
