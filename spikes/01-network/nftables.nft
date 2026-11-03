@@ -21,6 +21,7 @@ table inet wsm {
 	counter wsm0_blocked {}
 	counter lan_blocked {}
 	counter linklocal_blocked {}
+	counter host_blocked {}
 
 	set dns4 {
 		type ipv4_addr
@@ -60,6 +61,11 @@ table inet wsm {
 		ip6 daddr fc00::/7 counter name lan_blocked reject
 		ip daddr 169.254.0.0/16 counter name linklocal_blocked reject
 		ip6 daddr fe80::/10 counter name linklocal_blocked reject
+
+		# Any other address of the host itself, such as a public one. Podman
+		# maps 169.254.1.2 to it, so without this rule a sandbox reaches host
+		# services bound to all addresses.
+		fib daddr type local counter name host_blocked reject
 
 		# 4. Everything else (internet) stays open: policy accept.
 	}

@@ -339,6 +339,12 @@ verdict NET-LAN $ok "private ranges blocked from sbx-a-work and for UID $UID_A: 
 
 log "NET-METADATA"
 L=$RESULTS/NET-METADATA.log
+# Control, not a criterion: only a cloud server has a metadata service to block.
+if probe_root 169.254.169.254 80 >>"$L" 2>&1; then
+	note "metadata service answers for root: NET-METADATA blocks a real service"
+else
+	note "no metadata service answers for root: NET-METADATA only proves the rule"
+fi
 ok=1
 blocked_by "$L" linklocal_blocked probe_ctr wsm-p-a sbx-a-work 169.254.169.254 80 || ok=0
 blocked_by "$L" linklocal_blocked probe_uid wsm-p-a 169.254.169.254 80 || ok=0
@@ -387,13 +393,16 @@ else
 	echo "-- host address ${HOST_ADDR:-none} is not private" >>"$L"
 fi
 note "host address class: $(is_private4 "${HOST_ADDR:-}" && echo private || echo public)"
+# A private host address matches the LAN rule first.
+host_counter=host_blocked
+is_private4 "${HOST_ADDR:-}" && host_counter=lan_blocked
 ok=1
 succeeds "$L" probe_root "${HOST_ADDR:-127.0.0.1}" "$HOST_PORT" || ok=0
 if [[ -n $HOST_ADDR ]]; then
-	fails "$L" probe_uid wsm-p-a "$HOST_ADDR" "$HOST_PORT" || ok=0
+	blocked_by "$L" "$host_counter" probe_uid wsm-p-a "$HOST_ADDR" "$HOST_PORT" || ok=0
 fi
 for t in host.containers.internal 169.254.1.2; do
-	fails "$L" probe_ctr wsm-p-a sbx-a-work "$t" "$HOST_PORT" || ok=0
+	blocked_by "$L" "$host_counter" probe_ctr wsm-p-a sbx-a-work "$t" "$HOST_PORT" || ok=0
 done
 verdict NET-HOST-SERVICE $ok "host service on 0.0.0.0:$HOST_PORT unreachable for UID $UID_A and from sbx-a-work"
 

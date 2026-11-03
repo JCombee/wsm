@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted for the mechanism. The rule set is not final: see Consequences.
+Accepted.
 
 ## Context
 
@@ -14,12 +14,12 @@ Filter in an own table `inet wsm` on the output hook, matching `meta skuid` on t
 
 1. Accept the host resolver and `10.255.0.1:7443` (MCP).
 2. Accept `uid . address . port` elements added per project on `service_enable`.
-3. Reject loopback, private ranges, link-local and metadata, including `10.255.0.1` on other ports.
+3. Reject loopback, private ranges, link-local and metadata, including `10.255.0.1` on other ports, and every other address of the host itself with `fib daddr type local`.
 4. Leave everything else open.
 
 ## Consequences
 
 - Network access to a shared service applies per project, because all sandboxes of a project share a UID. Per-sandbox accounts separate the data.
 - Named counters on block rules let tests tell "blocked by this rule" from "nothing listening".
-- The rule set does not yet cover a host with a public address. Podman maps `169.254.1.2` to the host, so a rule for host-local addresses is probably needed. This is open until the owner decides and a rerun tests it.
+- Podman maps `169.254.1.2` to the host, and spike 01 confirmed that without the `fib` rule a sandbox reaches host services bound to `0.0.0.0` on a public address. The rule comes after the allow rules, so DNS, MCP and enabled services keep working. A rerun must still confirm that the rule closes this gap.
 - IPv6 rules are present but barely tested.

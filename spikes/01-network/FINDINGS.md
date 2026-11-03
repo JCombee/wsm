@@ -1,47 +1,44 @@
 # Findings: spike 01 network
 
-- **Run:** 2 November 2026, on host `alien`: Ubuntu 26.04.1, kernel 7.0.0-38, Podman 5.7.0, nftables 1.1.6, pasta 2026-01-20, LAN address 192.168.0.133, no global IPv6.
-- **Environment caveat:** this was not the intended Debian 13 VM. The network details (`enp2s0`, `wlp3s0`, ufw rules) suggest a physical machine. The owner needs to confirm whether it is disposable.
-- **Outcome:** no-go for M1 for now. One criterion failed on a test artefact, and the run could not test a host with a public address.
+- **Latest run:** 3 November 2026, `20261103T195440Z-2ee7611`, on a DigitalOcean droplet (KVM): Debian 13, kernel 6.12.113, Podman 5.4.2, nftables 1.1.3, with a public IPv4 address.
+- **Earlier run:** 2 November 2026 on host `alien` (Ubuntu 26.04, Podman 5.7.0, private address). That machine looked physical, so its results count as supporting evidence only.
+- **Outcome:** no-go for M1. `NET-HOST-SERVICE` confirms a real gap on hosts with a public address.
 
-## Criteria
+## Criteria (latest run)
 
 | ID | Result | Evidence |
 |---|---|---|
 | `NET-DNS` | PASS | `getent hosts deb.debian.org` resolves in `sbx-a-work` |
 | `NET-INTERNET` | PASS | HTTP response from `deb.debian.org:80` |
-| `NET-MARIA-BEFORE` | PASS | root connects; sandbox refused, `wsm0_blocked` 0 -> 1 |
-| `NET-MARIA-AFTER` | PASS | `CURRENT_USER()` is `sbx_a@%`, `svc_allowed` 0 -> 1 |
+| `NET-MARIA-BEFORE` | PASS | root connects; sandbox refused by the `wsm0` rule |
+| `NET-MARIA-AFTER` | PASS | sandbox logs in as `sbx_a` after the rule is added |
 | `NET-MARIA-OTHER` | PASS | project B stays blocked after A's rule |
-| `NET-LAN` | FAIL (test artefact) | 6 of 7 probes moved `lan_blocked`; see below |
-| `NET-METADATA` | PASS | `linklocal_blocked` 0 -> 3, from sandbox and UID. No real metadata service on this network |
+| `NET-LAN` | PASS | `lan_blocked` 0 -> 6 for the private test addresses |
+| `NET-METADATA` | PASS | `linklocal_blocked` 0 -> 3. The run has no control proving the droplet's metadata service answers for root |
 | `NET-LOOPBACK` | PASS | `loopback_blocked` 0 -> 4 for IPv4 and IPv6 |
-| `NET-CROSS-PREVIEW` | PASS | root connects to `127.0.0.1:18080`; project A refused on every path tried |
+| `NET-CROSS-PREVIEW` | PASS | root connects to `127.0.0.1:18080`; project A does not, on every path tried |
 | `NET-WSM0-OTHER-PORT` | PASS | root connects to `10.255.0.1:9999`; sandbox refused |
+| `NET-HOST-SERVICE` | **FAIL** | see below |
 
 ## What we learned
 
-- **`NET-LAN` failed on the host's own address, and this is not a leak.** The probe to `192.168.0.133` was refused without moving the counter. pasta copies the host address into the namespace: `/etc/hosts` in the container maps `192.168.0.133` to the pod itself. The packet therefore never leaves the namespace. The test wrongly required a counter increase for this address. This explanation comes from the logs; it has not been confirmed by a rerun.
-- **`meta skuid` sees pasta's outbound traffic.** The UID-based counters moved for probes made from inside the container.
-- **Podman maps `169.254.1.2` and `host.containers.internal` to the host.** It starts pasta with `--map-guest-addr 169.254.1.2`. These probes were rejected, and the final `lan_blocked` count of 13 fits them being rejected by the private-range rule (7 from `NET-LAN`, 6 from the later gateway and host-mapping probes). This is inferred from counter totals, because those probes did not log per-probe counters.
+- **The gap is real.** A root listener on `0.0.0.0:18082` accepted connections from the project UID on the host address, and from inside `sbx-a-work` through `169.254.1.2` and `host.containers.internal`. Any host service bound to all addresses is therefore reachable from a sandbox on a host with a public address. On a private address the LAN rule happens to block this, which is why the run on `alien` could not show it.
+- **Services bound to specific addresses stayed out of reach.** B's preview on `127.0.0.1` and MariaDB on `10.255.0.1` were not reachable through the host mapping.
+- **The `NET-LAN` failure on `alien` was a test artefact.** The corrected test passes. The container's `/etc/hosts` again maps the host address to the pod itself, matching the Podman documentation that pasta copies host addresses.
+- **`meta skuid` sees pasta's outbound traffic,** on both Podman 5.4.2 and 5.7.0.
 
 ## Surprises and open questions
 
-- **Gap, not tested: hosts with a public address.** The block depends on the host address being private. On a public address, `169.254.1.2` most likely reaches host services bound to `0.0.0.0`, because no rule in plan section 3.3 covers it. Candidate fix: reject `fib daddr type local` for the project UID range, after the allow rules. The spike's public-address probe did not run here.
-- **IPv6 is barely tested.** Only `::1` was probed. `fc00::/7`, `fe80::/10` and `dns6` were not exercised, and the host has no global IPv6.
-- **The container's second nameserver is `192.168.0.1`.** The private-range rule should block it. No test targeted DNS to that address specifically.
-- **`ct state established,related accept` is untested in isolation.** No test removes it to show that previews need it.
+- **The public gateway is not blocked.** Probes to it timed out (rc=124) instead of being rejected. Plan section 3.3 leaves non-private addresses open, so other public hosts in the same network count as internet.
+- **IPv6 is barely tested.** Only `::1` was probed, and `dns6` stayed empty.
+- **The droplet's second container nameserver is a private address.** The private-range rule should block it; no test targets it.
+- **`ct state established,related accept` is untested in isolation.**
 
 ## Decisions
 
 - Filtering per UID with `meta skuid` works for pasta: see `docs/adr/0001-per-uid-egress-filter.md`.
-- Blocking host-local addresses changes plan section 3.3, so the owner decides.
+- The owner approved rejecting `fib daddr type local` for the project UID range, after the allow rules. It is added to `nftables.nft` and plan section 3.3, but has not run yet.
 
 ## Needed before M1
 
-The tests below describe the changes made after this run; they have not run yet.
-
-1. `NET-LAN` now requires the host's own address to fail, without a counter increase.
-2. New test `NET-HOST-SERVICE`: a root listener on `0.0.0.0` must be unreachable for the project UID and from a sandbox, including through `169.254.1.2`.
-3. Rerun on a disposable Debian 13 cloud VM with a public address, using `wsm-test-server`. Without a new rule, `NET-HOST-SERVICE` is expected to fail there, which would confirm the gap.
-4. The owner decides on the local-address rule, then a final rerun must pass.
+A rerun on a disposable server with a public address must pass `NET-HOST-SERVICE`, with DNS, MCP and MariaDB still working. The run also records whether a metadata service answers for root.

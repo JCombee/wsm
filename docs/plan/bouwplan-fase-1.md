@@ -70,7 +70,8 @@ Elke projectgebruiker heeft een eigen Podman-socket. De manager krijgt daar toeg
   3. **Geblokkeerd voor de hele project-UID-reeks:**
      - loopback (127.0.0.0/8, ::1);
      - privé-reeksen (10/8, 172.16/12, 192.168/16, 100.64/10, fc00::/7);
-     - link-local en cloud-metadata (169.254.0.0/16, fe80::/10).
+     - link-local en cloud-metadata (169.254.0.0/16, fe80::/10);
+     - alle overige adressen van de host zelf (`fib daddr type local`), zoals een publiek IP. Podman koppelt `169.254.1.2` aan de host, dus zonder deze regel bereikt een sandbox hostdiensten die op alle adressen luisteren (spike 01).
 
      Omdat `10.255.0.1` binnen 10/8 valt, werken daar alleen de expliciet toegestane poorten.
   4. **Al het andere (internet) blijft open.** Dat valt onder de harnasregels.
@@ -259,6 +260,7 @@ Elke spike krijgt een eigen map in `spikes/` en eindigt met een `FINDINGS.md`. B
 - MariaDB bereiken vóór `service_enable`;
 - na `service_enable`: databases van anderen zien of gebruiken, `CREATE DATABASE` buiten het eigen prefix, of globale rechten gebruiken;
 - LAN-adressen, `169.254.169.254`, de manager-API, en poorten op `wsm0` buiten de toegestane bereiken;
+- hostdiensten die op alle adressen luisteren, ook via het publieke IP en `169.254.1.2`;
 - met het MCP-token van A iets doen voor sandbox B;
 - het Podman-socket vinden, of bestanden buiten de eigen volumes schrijven.
 

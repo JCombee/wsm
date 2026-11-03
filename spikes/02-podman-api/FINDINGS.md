@@ -2,7 +2,8 @@
 
 - **Run:** 2 November 2026, on host `alien`: Ubuntu 26.04.1, kernel 7.0.0-38, Podman 5.7.0, Go 1.26.8 for the bindings probe.
 - **Environment caveat:** this was not the intended Debian 13 VM; see `spikes/01-network/FINDINGS.md`.
-- **Outcome:** go for M1 on this spike's own criteria. All criteria passed.
+- **Confirmed:** on 3 November 2026, all criteria passed again on a DigitalOcean droplet (KVM) with Debian 13, kernel 6.12.113 and Podman 5.4.2 (run `20261103T195440Z-2ee7611`).
+- **Outcome:** go for M1 on this spike's own criteria. All criteria passed on both Podman versions.
 
 ## Criteria
 
@@ -26,7 +27,6 @@
 ## Surprises and open questions
 
 - The Go version on the machine (1.26.8) differs from the local one (1.27.3).
-- The tests ran on one Podman version only, and Debian 13 ships an older one than this host.
 - The socket is reachable by every member of group `wsm`, which is intended to be only the manager. The tests did not cover additional members.
 
 ## Decisions
