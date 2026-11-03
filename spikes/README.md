@@ -14,6 +14,20 @@ containers. **Run them only on a disposable VM**, never on a machine with real
 client data. Both scripts refuse to run unless `/etc/wsm-spike-disposable`
 exists (exit 3) and they run as root (exit 4).
 
+## Results
+
+Runs are stored in `spikes/runs/<run-id>/` (gitignored, because they hold server
+addresses). `spikes/runs/LATEST` names the newest run. Each run has:
+
+- `run.txt`: commit, server details and timestamps;
+- `SUMMARY.txt`: every criterion with PASS or FAIL;
+- `status.txt`: the exit code per spike;
+- `<spike>/console.log` and `<spike>/results/`: the raw output.
+
+The owner's `wsm-test-server` script, kept outside this repository, does the
+steps below over SSH and stores the results here. It tests a commit, so commit
+changes to the spikes first. The manual steps remain as a fallback.
+
 ## 1. Create the VM
 
 - Debian 13 (trixie), amd64, minimal install with SSH server.

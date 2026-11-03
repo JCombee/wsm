@@ -19,6 +19,7 @@ MCP_PORT=7443
 OTHER_PORT=9999     # root listener on wsm0 that no project may reach
 LOOPBACK_PORT=18081 # root listener on host loopback
 PREVIEW_PORT=18080  # project B's preview, published on 127.0.0.1
+HOST_PORT=18082     # root listener on all host addresses
 UID_A=50000
 UID_B=50001
 MARIADB_IMAGE=docker.io/library/mariadb:11.4
@@ -258,6 +259,7 @@ start_listener 127.0.0.1 "$LOOPBACK_PORT"
 start_listener -6 ::1 "$LOOPBACK_PORT"
 start_listener "$WSM0_ADDR" "$OTHER_PORT"
 start_listener "$WSM0_ADDR" "$MCP_PORT"
+start_listener 0.0.0.0 "$HOST_PORT"
 sleep 2
 
 GATEWAY=$(ip -4 route show default | awk '{ print $3; exit }')
@@ -323,13 +325,15 @@ if [[ -n $GATEWAY ]] && is_private4 "$GATEWAY"; then
 else
 	echo "-- gateway ${GATEWAY:-none} is not private, not probed" >>"$L"
 fi
-if [[ -n $HOST_ADDR ]] && is_private4 "$HOST_ADDR"; then
-	targets+=("$HOST_ADDR")
-fi
 ok=1
 for t in "${targets[@]}"; do
 	blocked_by "$L" lan_blocked probe_ctr wsm-p-a sbx-a-work "$t" 80 || ok=0
 done
+# pasta copies the host address into the pod, so from a container this address
+# is the pod itself and the packet never reaches the host's rules.
+if [[ -n $HOST_ADDR ]] && is_private4 "$HOST_ADDR"; then
+	fails "$L" probe_ctr wsm-p-a sbx-a-work "$HOST_ADDR" 80 || ok=0
+fi
 blocked_by "$L" lan_blocked probe_uid wsm-p-a 192.168.1.1 80 || ok=0
 verdict NET-LAN $ok "private ranges blocked from sbx-a-work and for UID $UID_A: ${targets[*]}"
 
@@ -373,21 +377,32 @@ succeeds "$L" probe_root "$WSM0_ADDR" "$OTHER_PORT" || ok=0
 blocked_by "$L" wsm0_blocked probe_ctr wsm-p-a sbx-a-work "$WSM0_ADDR" "$OTHER_PORT" || ok=0
 verdict NET-WSM0-OTHER-PORT $ok "$WSM0_ADDR:$OTHER_PORT blocked for A, which may reach only $MARIADB_PORT and $MCP_PORT"
 
+log "NET-HOST-SERVICE"
+L=$RESULTS/NET-HOST-SERVICE.log
+# A host service bound to all addresses. On a public host address no block rule
+# applies, so this is the test that shows whether a sandbox can reach it.
+if is_private4 "${HOST_ADDR:-}"; then
+	echo "-- host address ${HOST_ADDR:-none} is private" >>"$L"
+else
+	echo "-- host address ${HOST_ADDR:-none} is not private" >>"$L"
+fi
+note "host address class: $(is_private4 "${HOST_ADDR:-}" && echo private || echo public)"
+ok=1
+succeeds "$L" probe_root "${HOST_ADDR:-127.0.0.1}" "$HOST_PORT" || ok=0
+if [[ -n $HOST_ADDR ]]; then
+	fails "$L" probe_uid wsm-p-a "$HOST_ADDR" "$HOST_PORT" || ok=0
+fi
+for t in host.containers.internal 169.254.1.2; do
+	fails "$L" probe_ctr wsm-p-a sbx-a-work "$t" "$HOST_PORT" || ok=0
+done
+verdict NET-HOST-SERVICE $ok "host service on 0.0.0.0:$HOST_PORT unreachable for UID $UID_A and from sbx-a-work"
+
 # Informational: not criteria, but useful for the findings.
 L=$RESULTS/INFO.log
 if probe_ctr wsm-p-a sbx-a-work "$WSM0_ADDR" "$MCP_PORT" >>"$L" 2>&1; then
 	note "MCP port $WSM0_ADDR:$MCP_PORT reachable from sbx-a-work (expected)"
 else
 	note "MCP port $WSM0_ADDR:$MCP_PORT NOT reachable from sbx-a-work (unexpected)"
-fi
-if [[ -n $HOST_ADDR ]] && ! is_private4 "$HOST_ADDR"; then
-	# A public host address is not covered by any block rule; record whether
-	# host services bound to 0.0.0.0 are reachable through it.
-	if probe_ctr wsm-p-a sbx-a-work "$HOST_ADDR" 22 >>"$L" 2>&1; then
-		note "host's public address $HOST_ADDR:22 reachable from sbx-a-work: consider blocking 'fib daddr type local'"
-	else
-		note "host's public address $HOST_ADDR:22 not reachable from sbx-a-work"
-	fi
 fi
 
 # --- wrap up ----------------------------------------------------------------

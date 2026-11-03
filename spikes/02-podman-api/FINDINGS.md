@@ -1,33 +1,35 @@
-NOG NIET UITGEVOERD
-===================
-
 # Findings: spike 02 Podman API
 
-Not run yet. After a run on a disposable VM, replace this file using the
-template in `spikes/README.md`, with evidence from `results/`.
+- **Run:** 2 November 2026, on host `alien`: Ubuntu 26.04.1, kernel 7.0.0-38, Podman 5.7.0, Go 1.26.8 for the bindings probe.
+- **Environment caveat:** this was not the intended Debian 13 VM; see `spikes/01-network/FINDINGS.md`.
+- **Outcome:** go for M1 on this spike's own criteria. All criteria passed.
 
-## Criteria to fill in
+## Criteria
 
-| ID | What it shows | Result | Evidence |
-|---|---|---|---|
-| `POD-SOCKET-ACCESS` | `wsm` reaches `wsm-p-a`'s socket through group `wsm`; `wsm-p-b` does not | | |
-| `POD-USERNS` | pod with `keep-id:uid=1000,gid=1000`; uid 1000 inside is the project user | | |
-| `POD-HARDENING` | `NoNewPrivs=1`, `Seccomp=2`, `CapEff=0`, uid 1000, cpu/memory/pids limits, no mounts | | |
-| `POD-EXEC-WS` | exec output comes back over the WebSocket | | |
-| `POD-RESIZE` | a resize message is visible in `stty size` | | |
-| `POD-BINDINGS-CGO0` | official bindings build static without cgo (FAIL means: own REST client) | | |
-| `GO-TEST` | unit tests and `go vet` pass on the VM | | |
-| `STATICCHECK` | `staticcheck` is clean | | |
+| ID | Result | Evidence |
+|---|---|---|
+| `POD-SOCKET-ACCESS` | PASS | `wsm` gets `_ping` OK through group `wsm`; `wsm-p-b` is denied |
+| `GO-TEST` | PASS | `go vet` and `go test` clean |
+| `POD-USERNS` | PASS | uid 1000 in the container is host uid 50000 |
+| `POD-HARDENING` | PASS | `NoNewPrivs: 1`, `Seccomp: 2`, `CapEff: 0`, uid 1000, cpu/memory/pids limits, no mounts |
+| `POD-EXEC-WS` | PASS | the marker output came back over the WebSocket |
+| `POD-RESIZE` | PASS | `stty size` shows `37 123` after a resize message |
+| `POD-BINDINGS-CGO0` | PASS | static binary with `CGO_ENABLED=0`, and it reached the socket |
+| `STATICCHECK` | PASS | staticcheck 2025.1.1 clean |
 
-## Questions to answer
+## What we learned
 
-- Is the socket in a setgid directory under `/run/wsm-podman/` the approach
-  for M1? The socket drop-in lives in the project user's home, which that
-  user can change; does it belong in `/etc/systemd/user/` instead?
-- `--init` makes Podman bind-mount catatonit into the container; does that
-  show up in `mountinfo` (see `podmanapi.log`), and is it acceptable next to
-  invariant 1?
-- Does Podman answer exec start with 101 or 200, and does resize work right
-  after start?
-- Binary size and dependency count of the bindings probe
-  (`bindings-deps.txt`) against the own REST client.
+- **Socket access works with a systemd drop-in.** `podman.socket` listens on `/run/wsm-podman/<user>/podman.sock`, mode 0660, group `wsm`, in a setgid directory `drwxr-s---`. See `docs/adr/0002-podman-socket-access.md`.
+- **The thin REST client is enough for this spike.** With only the standard library plus `coder/websocket`, it covers pod creation, hardening, exec with TTY and resize against Podman 5.7.0.
+- **The bindings build, but they are heavy.** The probe is 36.4 MB with 120 listed dependencies, including `github.com/mattn/go-sqlite3` in the module list, although the binary is static. It used bindings v5.4.2 against a 5.7.0 server, and it only exercised a basic connection, not the full API surface.
+
+## Surprises and open questions
+
+- The Go version on the machine (1.26.8) differs from the local one (1.27.3).
+- The tests ran on one Podman version only, and Debian 13 ships an older one than this host.
+- The socket is reachable by every member of group `wsm`, which is intended to be only the manager. The tests did not cover additional members.
+
+## Decisions
+
+- Socket access: `docs/adr/0002-podman-socket-access.md`.
+- Bindings or REST client: the owner chose the thin REST client; see `docs/adr/0003-podman-rest-client.md`.
