@@ -2,7 +2,7 @@
 
 - **Run:** 2 November 2026, on host `alien`: Ubuntu 26.04.1, kernel 7.0.0-38, Podman 5.7.0, Go 1.26.8 for the bindings probe.
 - **Environment caveat:** this was not the intended Debian 13 VM; see `spikes/01-network/FINDINGS.md`.
-- **Confirmed:** on 3 November 2026, all criteria passed again on a DigitalOcean droplet (KVM) with Debian 13, kernel 6.12.113 and Podman 5.4.2 (run `20261103T195440Z-2ee7611`).
+- **Confirmed:** on 3 November 2026, all criteria passed again on a DigitalOcean droplet (KVM) with Debian 13, kernel 6.12.113 and Podman 5.4.2 (runs `20261103T195440Z-2ee7611` and `20261103T201005Z-02b18b5`).
 - **Outcome:** go for M1 on this spike's own criteria. All criteria passed on both Podman versions.
 
 ## Criteria

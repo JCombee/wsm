@@ -21,5 +21,5 @@ Filter in an own table `inet wsm` on the output hook, matching `meta skuid` on t
 
 - Network access to a shared service applies per project, because all sandboxes of a project share a UID. Per-sandbox accounts separate the data.
 - Named counters on block rules let tests tell "blocked by this rule" from "nothing listening".
-- Podman maps `169.254.1.2` to the host, and spike 01 confirmed that without the `fib` rule a sandbox reaches host services bound to `0.0.0.0` on a public address. The rule comes after the allow rules, so DNS, MCP and enabled services keep working. A rerun must still confirm that the rule closes this gap.
+- Podman maps `169.254.1.2` to the host, and spike 01 confirmed that without the `fib` rule a sandbox reaches host services bound to `0.0.0.0` on a public address. The rule comes after the allow rules, so DNS, MCP and enabled services keep working. A rerun on a fresh droplet with a public address confirmed both.
 - IPv6 rules are present but barely tested.
