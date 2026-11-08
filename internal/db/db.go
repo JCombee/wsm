@@ -51,6 +51,26 @@ func Open(ctx context.Context, path string) (*sql.DB, error) {
 	return sqlDB, nil
 }
 
+// OpenReadOnly opens an existing database without changing it: no
+// migrations, no schema changes. It is meant for offline checks such as
+// "wsm audit verify".
+func OpenReadOnly(ctx context.Context, path string) (*sql.DB, error) {
+	q := url.Values{}
+	q.Set("mode", "ro")
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "query_only(1)")
+	dsn := "file:" + (&url.URL{Path: path}).EscapedPath() + "?" + q.Encode()
+	sqlDB, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open database read-only: %w", err)
+	}
+	if err := sqlDB.PingContext(ctx); err != nil {
+		sqlDB.Close()
+		return nil, fmt.Errorf("open database read-only: %w", err)
+	}
+	return sqlDB, nil
+}
+
 // Migrate applies every pending embedded migration.
 func Migrate(ctx context.Context, sqlDB *sql.DB) error {
 	fsys, err := fs.Sub(migrations, "migrations")
