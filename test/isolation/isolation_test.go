@@ -232,8 +232,14 @@ func TestContainerHardening(t *testing.T) {
 func TestNoPodmanSocketInSandbox(t *testing.T) {
 	ctx := ctxT(t)
 	for _, p := range []project{s.a, s.b} {
+		// Output and "Permission denied" errors come back mixed; only lines
+		// that start with "/" are paths. The search runs as the workspace
+		// user, so it sees what an agent can see.
 		out, _ := inSandbox(ctx, p, "find", "/", "-xdev", "-type", "s")
-		for _, line := range strings.Fields(out) {
+		for _, line := range strings.Split(out, "\n") {
+			if !strings.HasPrefix(line, "/") {
+				continue
+			}
 			// tmux keeps its own socket in /tmp/tmux-1000.
 			if strings.HasPrefix(line, "/tmp/tmux-1000/") {
 				continue
