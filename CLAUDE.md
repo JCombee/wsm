@@ -72,4 +72,4 @@ These rules hold everywhere: in spikes, test helpers and shortcuts too. If a tas
 - **Formatting and linting:** `gofmt`, `go vet` and `staticcheck` must be clean.
 - **Tooling:** M1 adds a `Makefile` with `build`, `test`, `lint` and `isolation-test` targets.
 - **Frontend:** lives in `web/`. Vue 3 + TypeScript + Vite is a proposal; confirm with the owner before scaffolding it.
-- **Naming:** `wsm` is a working name. Ask the owner for the final name and module path before creating `go.mod`.
+- **Naming:** `wsm` is a working name. The module path is `github.com/JCombee/wsm`. Ask the owner before renaming either.
