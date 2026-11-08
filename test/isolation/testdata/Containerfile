@@ -1,0 +1,13 @@
+# Test image for the isolation tests. Meets the project image requirements of
+# plan section 3.8: tmux, git, bash, and user 1000 with home /home/agent.
+# netcat-openbsd serves the preview port in TestOtherProjectPreviewPort.
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash tmux git netcat-openbsd ca-certificates \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 1000 agent \
+ && useradd --uid 1000 --gid 1000 --home-dir /home/agent --create-home --shell /bin/bash agent \
+ && install -d -o 1000 -g 1000 /workspace
+WORKDIR /workspace
+# The debian base image has CMD bash, which exits at once without a TTY.
+CMD ["sleep", "infinity"]
