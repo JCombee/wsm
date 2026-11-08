@@ -1,0 +1,15 @@
+# The helper socket. Only group wsm can open it; wsm-helper also checks the
+# peer UID with SO_PEERCRED (CLAUDE.md invariant 4).
+[Unit]
+Description=wsm privileged helper socket
+
+[Socket]
+ListenStream=/run/wsm/helper.sock
+SocketUser=root
+SocketGroup=wsm
+SocketMode=0660
+DirectoryMode=0755
+Accept=no
+
+[Install]
+WantedBy=sockets.target

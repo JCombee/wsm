@@ -1,0 +1,36 @@
+# The wsm manager. Runs as wsm; reaches the project Podman sockets through
+# group wsm (ADR 0002) and wsm-helper through /run/wsm/helper.sock.
+[Unit]
+Description=wsm workspace manager
+Requires=wsm.socket wsm-helper.socket
+After=wsm.socket wsm-helper.socket wsm-helper.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=wsm
+Group=wsm
+ExecStart=/usr/local/bin/wsm serve
+Restart=on-failure
+StateDirectory=wsm
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

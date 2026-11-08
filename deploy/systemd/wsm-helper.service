@@ -1,0 +1,21 @@
+# wsm-helper: the only part of wsm that runs as root. It creates and removes
+# project users, sets up wsm0 and loads the nftables base rules.
+[Unit]
+Description=wsm privileged helper
+Requires=wsm-helper.socket
+After=wsm-helper.socket network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/wsm-helper serve
+Restart=on-failure
+PrivateTmp=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictRealtime=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RestrictAddressFamilies=AF_UNIX AF_NETLINK AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

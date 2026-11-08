@@ -177,7 +177,7 @@ func TestProjectSpecValidation(t *testing.T) {
 		{"slug ends in dash", ProjectSpec{Slug: "app-", ImageRef: "img"}},
 		{"slug too long", ProjectSpec{Slug: strings.Repeat("a", 33), ImageRef: "img"}},
 		{"no image", ProjectSpec{Slug: "app"}},
-		{"image with space", ProjectSpec{Slug: "app", ImageRef: "img --privileged"}},
+		{"image with space", ProjectSpec{Slug: "app", ImageRef: "img --cap-add=ALL"}},
 		{"image as option", ProjectSpec{Slug: "app", ImageRef: "-v"}},
 		{"cpu too low", ProjectSpec{Slug: "app", ImageRef: "img", CPUMillis: 1}},
 		{"memory too high", ProjectSpec{Slug: "app", ImageRef: "img", MemBytes: 1 << 50}},

@@ -108,6 +108,21 @@ func run(ctx context.Context, stdin io.Reader, env []string, name string, args .
 	return out.String(), nil
 }
 
+// runAsUser runs a tool as the project user of uid, with the environment
+// its systemd user instance and rootless Podman need.
+func runAsUser(ctx context.Context, uid int, name string, args ...string) (string, error) {
+	path, err := lookTool(name)
+	if err != nil {
+		return "", err
+	}
+	full := append([]string{"-u", UserName(uid), "--", path}, args...)
+	return run(ctx, nil, []string{
+		"HOME=" + HomeDir(uid),
+		fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid),
+		fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus", uid),
+	}, "runuser", full...)
+}
+
 // cappedBuffer keeps the first maxToolOutput bytes written to it.
 type cappedBuffer struct{ bytes.Buffer }
 
@@ -206,12 +221,10 @@ func (o *SystemOps) CreateProjectUser(ctx context.Context, uid int) error {
 	if err := waitFor(ctx, fmt.Sprintf("/run/user/%d/bus", uid), 60*time.Second); err != nil {
 		return fmt.Errorf("user manager of %s: %w", name, err)
 	}
-	if _, err := run(ctx, nil, nil, "systemctl", "--user", "--machine", name+"@",
-		"daemon-reload"); err != nil {
+	if _, err := runAsUser(ctx, uid, "systemctl", "--user", "daemon-reload"); err != nil {
 		return err
 	}
-	if _, err := run(ctx, nil, nil, "systemctl", "--user", "--machine", name+"@",
-		"enable", "--now", "podman.socket"); err != nil {
+	if _, err := runAsUser(ctx, uid, "systemctl", "--user", "enable", "--now", "podman.socket"); err != nil {
 		return err
 	}
 	if err := waitFor(ctx, PodmanSocket(uid), 30*time.Second); err != nil {
@@ -373,11 +386,7 @@ func (o *SystemOps) DeleteProjectUser(ctx context.Context, uid int) error {
 		// Best effort: remove the user's containers, images and volumes
 		// while its Podman still runs.
 		if _, err := os.Stat(fmt.Sprintf("/run/user/%d/bus", uid)); err == nil {
-			if _, err := run(ctx, nil, []string{
-				"HOME=" + HomeDir(uid),
-				fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid),
-				fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus", uid),
-			}, "runuser", "-u", name, "--", "podman", "system", "reset", "--force"); err != nil {
+			if _, err := runAsUser(ctx, uid, "podman", "system", "reset", "--force"); err != nil {
 				o.logf("podman system reset for %s: %v", name, err)
 			}
 		}

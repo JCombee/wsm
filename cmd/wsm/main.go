@@ -23,6 +23,7 @@ type env struct {
 	stdin  io.Reader
 	stdout io.Writer
 	stderr io.Writer
+	getenv func(string) string
 }
 
 type command struct {
@@ -36,7 +37,11 @@ func commands() map[string]command {
 			fmt.Fprintf(e.stdout, "wsm %s\n", version)
 			return nil
 		}},
-		"audit": {"audit verify [--db PATH]", runAudit},
+		"audit":   {"audit verify [--db PATH]", runAudit},
+		"serve":   {"serve [--db PATH] [--socket PATH] [--helper-socket PATH]", runServe},
+		"project": {"project create --slug SLUG --image REF [--name NAME] [--cpus N] [--memory SIZE] [--pids N] | list | delete SLUG", runProject},
+		"sandbox": {"sandbox create|start|stop|delete PROJECT/SANDBOX | list [PROJECT]", runSandbox},
+		"shell":   {"shell PROJECT/SANDBOX", runShell},
 	}
 }
 
@@ -68,7 +73,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		printUsage(stderr, cmds)
 		return 2
 	}
-	err := cmd.run(env{ctx: ctx, args: args[1:], stdin: stdin, stdout: stdout, stderr: stderr})
+	err := cmd.run(env{ctx: ctx, args: args[1:], stdin: stdin, stdout: stdout, stderr: stderr, getenv: os.Getenv})
 	if err == nil {
 		return 0
 	}
