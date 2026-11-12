@@ -46,7 +46,6 @@ CREATE TABLE jobs (
     type        TEXT NOT NULL,
     ref_id      TEXT NOT NULL,
     status      TEXT NOT NULL,
-    log_path    TEXT,
     error       TEXT,
     created_at  TEXT NOT NULL,
     finished_at TEXT

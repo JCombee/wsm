@@ -121,10 +121,11 @@ func TestResponsesAreUntrusted(t *testing.T) {
 		body    string
 		wantErr string
 	}{
-		{"valid", `{"Version":"5.4.2"}`, ""},
-		{"too large", `{"Version":"` + strings.Repeat("a", MaxResponse) + `"}`, "exceeds"},
-		{"trailing data", `{"Version":"5.4.2"} {"Version":"6"}`, "trailing data"},
-		{"wrong type", `{"Version":5}`, "decode response"},
+		{"valid", `{"Config":{"Cmd":["sleep","infinity"]}}`, ""},
+		{"too large", `{"Config":{"Cmd":["` + strings.Repeat("a", MaxResponse) + `"]}}`, "exceeds"},
+		{"trailing data", `{"Config":{}} {"Config":{}}`, "trailing data"},
+		{"trailing brace", `{"Config":{}}}`, "trailing data"},
+		{"wrong type", `{"Config":{"Cmd":5}}`, "decode response"},
 		{"not json", `hello`, "decode response"},
 	}
 	for _, tt := range tests {
@@ -132,10 +133,10 @@ func TestResponsesAreUntrusted(t *testing.T) {
 			c := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				io.WriteString(w, tt.body)
 			}))
-			v, err := c.Version(context.Background())
+			cfg, err := c.ImageInspect(context.Background(), "img")
 			if tt.wantErr == "" {
-				if err != nil || v != "5.4.2" {
-					t.Fatalf("Version = %q, %v", v, err)
+				if err != nil || strings.Join(cfg.Cmd, " ") != "sleep infinity" {
+					t.Fatalf("ImageInspect = %+v, %v", cfg, err)
 				}
 				return
 			}
@@ -189,8 +190,8 @@ func TestRemoveNotFoundIsNoError(t *testing.T) {
 	if err := c.VolumeRemove(ctx, "sbx-x-code"); err != nil {
 		t.Errorf("VolumeRemove: %v", err)
 	}
-	if ok, err := c.PodExists(ctx, "sbx-x"); ok || err != nil {
-		t.Errorf("PodExists = %v, %v", ok, err)
+	if ok, err := c.VolumeExists(ctx, "sbx-x-code"); ok || err != nil {
+		t.Errorf("VolumeExists = %v, %v", ok, err)
 	}
 	if ok, err := c.ImageExists(ctx, "img"); ok || err != nil {
 		t.Errorf("ImageExists = %v, %v", ok, err)
@@ -203,39 +204,6 @@ func TestPodActionReportsErrs(t *testing.T) {
 	}))
 	if err := c.PodStart(context.Background(), "sbx-x"); err == nil || !strings.Contains(err.Error(), "container failed") {
 		t.Fatalf("PodStart = %v", err)
-	}
-}
-
-func TestImagePull(t *testing.T) {
-	tests := []struct {
-		name    string
-		stream  string
-		wantErr string
-	}{
-		{"ok", `{"stream":"pulling"}` + "\n" + `{"id":"abc","images":["abc"]}`, ""},
-		{"error object", `{"stream":"pulling"}{"error":"manifest unknown"}`, "manifest unknown"},
-		{"garbage", `{"stream":`, "read progress"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Query().Get("reference") != "docker.io/library/x:1" {
-					http.Error(w, `{"message":"bad ref"}`, 400)
-					return
-				}
-				io.WriteString(w, tt.stream)
-			}))
-			err := c.ImagePull(context.Background(), "docker.io/library/x:1")
-			if tt.wantErr == "" {
-				if err != nil {
-					t.Fatal(err)
-				}
-				return
-			}
-			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-				t.Fatalf("err = %v, want %q", err, tt.wantErr)
-			}
-		})
 	}
 }
 

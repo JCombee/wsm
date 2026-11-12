@@ -41,20 +41,25 @@ func (f *fakeUsers) DeleteProjectUser(_ context.Context, uid int) error {
 	return nil
 }
 
-// fakeLibpod is a minimal stateful libpod API.
+// fakeLibpod is a minimal stateful libpod API. It has no pull endpoint:
+// wsm must never pull.
 type fakeLibpod struct {
-	mu         sync.Mutex
-	requests   []string
-	bodies     map[string]map[string]any
-	pods       map[string]bool
-	volumes    map[string]bool
-	hasImage   bool
-	imageCmd   []string
-	failCreate bool
+	mu              sync.Mutex
+	requests        []string
+	bodies          map[string]map[string]any
+	pods            map[string]bool
+	volumes         map[string]bool
+	hasImage        bool
+	imageCmd        []string
+	imageEntrypoint []string
+	failCreate      bool
 }
 
 func newFakeLibpod() *fakeLibpod {
-	return &fakeLibpod{bodies: map[string]map[string]any{}, pods: map[string]bool{}, volumes: map[string]bool{}}
+	return &fakeLibpod{
+		bodies: map[string]map[string]any{}, pods: map[string]bool{}, volumes: map[string]bool{},
+		hasImage: true,
+	}
 }
 
 func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -79,9 +84,6 @@ func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		parts[i], _ = url.PathUnescape(parts[i])
 	}
 	switch {
-	case path == "/images/pull":
-		f.hasImage = true
-		io.WriteString(w, `{"id":"img"}`)
 	case len(parts) == 3 && parts[0] == "images" && parts[2] == "exists":
 		if !f.hasImage {
 			notFound()
@@ -90,7 +92,8 @@ func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	case len(parts) == 3 && parts[0] == "images" && parts[2] == "json":
 		cmd, _ := json.Marshal(f.imageCmd)
-		fmt.Fprintf(w, `{"Id":"img","Config":{"Cmd":%s}}`, cmd)
+		ep, _ := json.Marshal(f.imageEntrypoint)
+		fmt.Fprintf(w, `{"Id":"img","Config":{"Cmd":%s,"Entrypoint":%s}}`, cmd, ep)
 	case path == "/volumes/create":
 		f.bodies["volume "+body["Name"].(string)] = body
 		f.volumes[body["Name"].(string)] = true
@@ -214,9 +217,6 @@ func TestSandboxLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !lp.hasImage {
-		t.Error("image was not pulled")
-	}
 
 	pod := lp.bodies["pod"]
 	if pod["name"] != "sbx-"+sb.ID {
@@ -317,19 +317,56 @@ func TestSandboxLifecycle(t *testing.T) {
 	}
 }
 
-func TestImageCmdIsKept(t *testing.T) {
+// TestImageCommandIsKept checks that an image's own CMD or ENTRYPOINT runs;
+// only an image with neither gets "sleep infinity" (ADR 0007).
+func TestImageCommandIsKept(t *testing.T) {
+	tests := []struct {
+		name            string
+		cmd, entrypoint []string
+	}{
+		{"cmd", []string{"supervisord"}, nil},
+		{"entrypoint", nil, []string{"/entrypoint.sh"}},
+		{"both", []string{"--serve"}, []string{"/entrypoint.sh"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _, lp := newManager(t)
+			lp.imageCmd, lp.imageEntrypoint = tt.cmd, tt.entrypoint
+			if _, err := m.CreateProject(ctx, ProjectSpec{Slug: "app", ImageRef: "img"}, userName); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := m.CreateSandbox(ctx, "app", "main"); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := lp.bodies["container"]["command"]; ok {
+				t.Errorf("command overridden: %v", lp.bodies["container"]["command"])
+			}
+		})
+	}
+}
+
+func TestCreateSandboxNeedsLocalImage(t *testing.T) {
 	ctx := context.Background()
 	m, _, lp := newManager(t)
-	lp.hasImage = true
-	lp.imageCmd = []string{"supervisord"}
-	if _, err := m.CreateProject(ctx, ProjectSpec{Slug: "app", ImageRef: "img"}, userName); err != nil {
+	lp.hasImage = false
+	if _, err := m.CreateProject(ctx, ProjectSpec{Slug: "app", ImageRef: "docker.io/library/x:1"}, userName); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.CreateSandbox(ctx, "app", "main"); err != nil {
-		t.Fatal(err)
+	_, err := m.CreateSandbox(ctx, "app", "main")
+	if !errors.Is(err, ErrState) || !strings.Contains(err.Error(), "docker.io/library/x:1 is not present") {
+		t.Fatalf("err = %v, want ErrState for the missing image", err)
 	}
-	if _, ok := lp.bodies["container"]["command"]; ok {
-		t.Errorf("command overridden: %v", lp.bodies["container"]["command"])
+	for _, r := range lp.requests {
+		if strings.Contains(r, "/pull") {
+			t.Errorf("wsm tried to pull: %s", r)
+		}
+	}
+	if len(lp.pods) != 0 || len(lp.volumes) != 0 {
+		t.Errorf("left: pods %v volumes %v", lp.pods, lp.volumes)
+	}
+	if sbs, _ := m.Sandboxes(ctx, "app"); len(sbs) != 0 {
+		t.Errorf("sandbox rows left: %+v", sbs)
 	}
 }
 

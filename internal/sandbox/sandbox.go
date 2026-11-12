@@ -360,15 +360,14 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 }
 
 func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Project, sb db.Sandbox) error {
+	// wsm neither pulls nor builds images yet; both come with M2 (plan
+	// section 5). Until then the image must already exist for the user.
 	ok, err := pc.ImageExists(ctx, p.ImageRef)
 	if err != nil {
 		return err
 	}
 	if !ok {
-		m.logf("pulling %s for project %s", p.ImageRef, p.Slug)
-		if err := pc.ImagePull(ctx, p.ImageRef); err != nil {
-			return err
-		}
+		return fmt.Errorf("image %s is not present for user %s: %w", p.ImageRef, p.LinuxUser, ErrState)
 	}
 	cfg, err := pc.ImageInspect(ctx, p.ImageRef)
 	if err != nil {

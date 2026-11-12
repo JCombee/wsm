@@ -30,9 +30,6 @@ const apiVersion = "v5.0.0"
 // MaxResponse caps every JSON response body read from Podman.
 const MaxResponse = 1 << 20
 
-// maxPullOutput caps the progress stream of an image pull.
-const maxPullOutput = 8 << 20
-
 // DialFunc opens a connection to the Podman API.
 type DialFunc func(ctx context.Context) (net.Conn, error)
 
@@ -61,10 +58,13 @@ func NewClientDialer(dial DialFunc) *Client {
 			}
 			return conn, nil
 		},
-		DisableCompression:    true,
-		MaxIdleConns:          2,
-		IdleConnTimeout:       30 * time.Second,
-		ResponseHeaderTimeout: 10 * time.Minute, // image pulls answer late
+		DisableCompression: true,
+		MaxIdleConns:       2,
+		IdleConnTimeout:    30 * time.Second,
+		// The project user runs the server, so a stalled answer must not
+		// hold the manager for long. Pod stop answers after its own stop
+		// timeout; nothing else is slow, since wsm pulls no images.
+		ResponseHeaderTimeout: 2 * time.Minute,
 	}}
 	return c
 }
@@ -189,21 +189,12 @@ type Namespace struct {
 	Value string `json:"value,omitempty"`
 }
 
-// PortMapping publishes a container port on the host.
-type PortMapping struct {
-	HostIP        string `json:"host_ip,omitempty"`
-	HostPort      uint16 `json:"host_port"`
-	ContainerPort uint16 `json:"container_port"`
-	Protocol      string `json:"protocol,omitempty"`
-}
-
 // PodSpec is the subset of libpod's PodSpecGenerator wsm uses.
 type PodSpec struct {
 	Name     string            `json:"name"`
 	Labels   map[string]string `json:"labels,omitempty"`
 	Userns   *Namespace        `json:"userns,omitempty"`
 	Netns    *Namespace        `json:"netns,omitempty"`
-	Ports    []PortMapping     `json:"portmappings,omitempty"`
 	Hostname string            `json:"hostname,omitempty"`
 }
 
@@ -259,17 +250,6 @@ type idResponse struct {
 	ID string `json:"Id"`
 }
 
-// Version returns the Podman server version.
-func (c *Client) Version(ctx context.Context) (string, error) {
-	var v struct {
-		Version string `json:"Version"`
-	}
-	if err := c.do(ctx, http.MethodGet, "/version", nil, nil, &v); err != nil {
-		return "", err
-	}
-	return v.Version, nil
-}
-
 // PodCreate creates a pod and returns its ID.
 func (c *Client) PodCreate(ctx context.Context, spec PodSpec) (string, error) {
 	var r idResponse
@@ -319,28 +299,6 @@ func (c *Client) PodRemove(ctx context.Context, name string) error {
 	return err
 }
 
-// PodExists reports whether a pod exists.
-func (c *Client) PodExists(ctx context.Context, name string) (bool, error) {
-	err := c.do(ctx, http.MethodGet, "/pods/"+url.PathEscape(name)+"/exists", nil, nil, nil)
-	if IsNotFound(err) {
-		return false, nil
-	}
-	return err == nil, err
-}
-
-// PodState is the subset of pod inspect output wsm reads.
-type PodState struct {
-	Name  string `json:"Name"`
-	State string `json:"State"`
-}
-
-// PodInspect returns the state of a pod.
-func (c *Client) PodInspect(ctx context.Context, name string) (PodState, error) {
-	var s PodState
-	err := c.do(ctx, http.MethodGet, "/pods/"+url.PathEscape(name)+"/json", nil, nil, &s)
-	return s, err
-}
-
 // ContainerCreate creates a container and returns its ID.
 func (c *Client) ContainerCreate(ctx context.Context, spec ContainerSpec) (string, error) {
 	var r idResponse
@@ -348,38 +306,6 @@ func (c *Client) ContainerCreate(ctx context.Context, spec ContainerSpec) (strin
 		return "", err
 	}
 	return r.ID, nil
-}
-
-// ContainerInspect is the subset of container inspect output wsm reads.
-type ContainerInspect struct {
-	State struct {
-		Pid     int    `json:"Pid"`
-		Running bool   `json:"Running"`
-		Status  string `json:"Status"`
-	} `json:"State"`
-	Mounts []struct {
-		Type        string `json:"Type"`
-		Name        string `json:"Name"`
-		Source      string `json:"Source"`
-		Destination string `json:"Destination"`
-	} `json:"Mounts"`
-	HostConfig struct {
-		Privileged  bool     `json:"Privileged"`
-		NetworkMode string   `json:"NetworkMode"`
-		CapDrop     []string `json:"CapDrop"`
-		SecurityOpt []string `json:"SecurityOpt"`
-		CPUQuota    int64    `json:"CpuQuota"`
-		CPUPeriod   uint64   `json:"CpuPeriod"`
-		Memory      int64    `json:"Memory"`
-		PidsLimit   int64    `json:"PidsLimit"`
-	} `json:"HostConfig"`
-}
-
-// ContainerInspect returns the parsed inspect output of a container.
-func (c *Client) ContainerInspect(ctx context.Context, name string) (ContainerInspect, error) {
-	var ci ContainerInspect
-	err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, nil, &ci)
-	return ci, err
 }
 
 // VolumeCreate creates a named volume. An existing volume is not an error.
@@ -441,43 +367,6 @@ func (c *Client) ImageInspect(ctx context.Context, ref string) (ImageConfig, err
 	return r.Config, err
 }
 
-// ImagePull pulls ref. Podman streams progress as JSON objects; the stream
-// is size limited and the last error object, if any, is the result.
-func (c *Client) ImagePull(ctx context.Context, ref string) error {
-	q := url.Values{"reference": {ref}, "policy": {"missing"}, "quiet": {"true"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint("/images/pull", q), nil)
-	if err != nil {
-		return fmt.Errorf("pull %s: %w", ref, err)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("pull %s: %w", ref, err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		data, _ := readLimited(resp.Body, MaxResponse)
-		return fmt.Errorf("pull %s: %w", ref, parseAPIError(resp.StatusCode, data))
-	}
-	dec := json.NewDecoder(io.LimitReader(resp.Body, maxPullOutput))
-	for {
-		var msg struct {
-			Error string `json:"error"`
-		}
-		if err := dec.Decode(&msg); err != nil {
-			if errors.Is(err, io.EOF) {
-				return nil
-			}
-			return fmt.Errorf("pull %s: read progress: %w", ref, err)
-		}
-		if msg.Error != "" {
-			if len(msg.Error) > maxErrorMessage {
-				msg.Error = msg.Error[:maxErrorMessage] + "..."
-			}
-			return fmt.Errorf("pull %s: %s", ref, msg.Error)
-		}
-	}
-}
-
 // ExecConfig is the body of an exec create request.
 type ExecConfig struct {
 	AttachStdin  bool     `json:"AttachStdin"`
@@ -506,7 +395,8 @@ type execStart struct {
 }
 
 // ExecStart starts an exec session and returns the hijacked connection.
-// With a TTY the stream is raw; without one it is multiplexed (see demux).
+// With a TTY the stream is raw; without one Podman multiplexes stdout and
+// stderr into frames.
 func (c *Client) ExecStart(ctx context.Context, id string, tty bool, rows, cols int) (io.ReadWriteCloser, error) {
 	body := execStart{Tty: tty}
 	if tty {
@@ -519,19 +409,6 @@ func (c *Client) ExecStart(ctx context.Context, id string, tty bool, rows, cols 
 func (c *Client) ExecResize(ctx context.Context, id string, rows, cols int) error {
 	q := url.Values{"h": {strconv.Itoa(rows)}, "w": {strconv.Itoa(cols)}}
 	return c.do(ctx, http.MethodPost, "/exec/"+url.PathEscape(id)+"/resize", q, nil, nil)
-}
-
-// ExecState is the subset of exec inspect output wsm reads.
-type ExecState struct {
-	Running  bool `json:"Running"`
-	ExitCode int  `json:"ExitCode"`
-}
-
-// ExecInspect returns the state of an exec session.
-func (c *Client) ExecInspect(ctx context.Context, id string) (ExecState, error) {
-	var s ExecState
-	err := c.do(ctx, http.MethodGet, "/exec/"+url.PathEscape(id)+"/json", nil, nil, &s)
-	return s, err
 }
 
 // hijackedConn is the raw connection after Podman switched protocols. Reads
