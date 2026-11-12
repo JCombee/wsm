@@ -26,6 +26,10 @@ var version = "dev"
 
 const usage = "usage: wsm-helper version | serve [--socket PATH]"
 
+// managerUser is the only user wsm-helper serves (CLAUDE.md invariant 4).
+// It is fixed on purpose: no flag or setting can widen who may connect.
+const managerUser = "wsm"
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
@@ -53,7 +57,6 @@ func serve(ctx context.Context, args []string, stderr io.Writer) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	socket := fs.String("socket", helper.DefaultSocket, "unix socket to listen on, unless systemd passes one")
-	manager := fs.String("manager-user", "wsm", "the only user allowed to connect")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -63,13 +66,13 @@ func serve(ctx context.Context, args []string, stderr io.Writer) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must run as root")
 	}
-	u, err := user.Lookup(*manager)
+	u, err := user.Lookup(managerUser)
 	if err != nil {
 		return fmt.Errorf("look up manager user: %w", err)
 	}
 	uid, err := strconv.ParseUint(u.Uid, 10, 32)
 	if err != nil || uid == 0 {
-		return fmt.Errorf("manager user %s has unusable uid %q", *manager, u.Uid)
+		return fmt.Errorf("manager user %s has unusable uid %q", managerUser, u.Uid)
 	}
 	logger := log.New(stderr, "", 0)
 	ln, err := sdsocket.Listen(*socket, 0o600)
