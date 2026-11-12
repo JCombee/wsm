@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/JCombee/wsm/internal/helper"
+	"github.com/JCombee/wsm/internal/projectuid"
 	"github.com/JCombee/wsm/internal/sandbox"
 )
 
@@ -350,12 +351,18 @@ func TestHostServiceBlocked(t *testing.T) {
 	blockedBy(t, "host_blocked", "project user to the host address", func() (bool, string) {
 		return probeAs(ctx, s.a.user, fmt.Sprintf("tcp:%s:%d", s.hostAddr, port))
 	})
-	// From the sandbox, pasta maps 169.254.1.2 and host.containers.internal
-	// to the host; the wsm rules must stop both.
-	for _, h := range []string{"169.254.1.2", "host.containers.internal", s.hostAddr} {
-		if ok, out := tcpFromSandbox(ctx, s.a, h, port); ok {
-			t.Errorf("sandbox reached host service via %s: %s", h, out)
-		}
+	// From the sandbox, pasta maps 169.254.1.2 to the host's address, and
+	// host.containers.internal resolves to 169.254.1.2: host_blocked must
+	// stop both.
+	for _, h := range []string{"169.254.1.2", "host.containers.internal"} {
+		blockedBy(t, "host_blocked", "sandbox to the host service via "+h, func() (bool, string) {
+			return tcpFromSandbox(ctx, s.a, h, port)
+		})
+	}
+	// pasta copies the host's address into the pod, so for the sandbox it is
+	// its own address: the connection stays in the pod and meets no wsm rule.
+	if ok, out := tcpFromSandbox(ctx, s.a, s.hostAddr, port); ok {
+		t.Errorf("sandbox reached the host service via %s: %s", s.hostAddr, out)
 	}
 }
 
@@ -429,7 +436,14 @@ func TestOtherProjectPreviewPort(t *testing.T) {
 	blockedBy(t, "loopback_blocked", "project A user to B's preview", func() (bool, string) {
 		return probeAs(ctx, s.a.user, fmt.Sprintf("tcp:127.0.0.1:%d", port))
 	})
-	for _, h := range []string{"127.0.0.1", "169.254.1.2", "host.containers.internal", s.hostAddr} {
+	for _, h := range []string{"169.254.1.2", "host.containers.internal"} {
+		blockedBy(t, "host_blocked", "sandbox A to B's preview via "+h, func() (bool, string) {
+			return tcpFromSandbox(ctx, s.a, h, port)
+		})
+	}
+	// 127.0.0.1 and the host's address are pod A's own addresses (pasta
+	// copies the latter into the pod), so these connections stay in pod A.
+	for _, h := range []string{"127.0.0.1", s.hostAddr} {
 		if ok, out := tcpFromSandbox(ctx, s.a, h, port); ok {
 			t.Errorf("sandbox A reached B's preview via %s: %s", h, out)
 		}
@@ -438,7 +452,7 @@ func TestOtherProjectPreviewPort(t *testing.T) {
 
 func TestHelperRejectsOtherUser(t *testing.T) {
 	ctx := ctxT(t)
-	const victim = 59999
+	const victim = projectuid.Max
 	// Project users cannot even open the socket.
 	for _, p := range []project{s.a, s.b} {
 		if ok, out := probeAs(ctx, p.user, "unix:"+helper.DefaultSocket); ok {
@@ -461,6 +475,84 @@ func TestHelperRejectsOtherUser(t *testing.T) {
 	}
 	if out, err := run(ctx, "ip", "-4", "addr", "show", "dev", "wsm0"); err != nil || !strings.Contains(out, "10.255.0.1/32") {
 		t.Errorf("control: wsm0 not set up: %s", out)
+	}
+}
+
+// TestSandboxLifecycle runs the rest of the CLI life cycle on the real
+// installation: stop, start again, wsm shell and delete. Setup already ran
+// create and start for the other sandboxes.
+func TestSandboxLifecycle(t *testing.T) {
+	ctx := ctxT(t)
+	const slug = "life"
+	target := s.a.slug + "/" + slug
+	if _, err := wsm(ctx, "sandbox", "create", target); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { wsm(context.Background(), "sandbox", "delete", target) })
+	sb, ok, err := findSandbox(ctx, s.a.slug, slug)
+	if err != nil || !ok {
+		t.Fatalf("sandbox %s not listed after create: %v", target, err)
+	}
+	life := s.a
+	life.sandboxID, life.container = sb.ID, sandbox.WorkContainer(sb.ID)
+	status := func() string {
+		sb, _, err := findSandbox(ctx, s.a.slug, slug)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return sb.Status
+	}
+	running := func() string {
+		out, _ := asUser(ctx, life, "podman", "container", "inspect", "--format", "{{.State.Running}}", life.container)
+		return strings.TrimSpace(out)
+	}
+
+	if _, err := wsm(ctx, "sandbox", "start", target); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitForExec(ctx, life); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := wsm(ctx, "sandbox", "stop", target); err != nil {
+		t.Fatal(err)
+	}
+	if st := status(); st != "stopped" {
+		t.Errorf("status after stop = %q, want stopped", st)
+	}
+	if r := running(); r != "false" {
+		t.Errorf("workspace container after stop: running = %q, want false", r)
+	}
+	if out, err := wsm(ctx, "shell", target); err == nil {
+		t.Errorf("wsm shell on a stopped sandbox succeeded: %s", out)
+	}
+
+	if _, err := wsm(ctx, "sandbox", "start", target); err != nil {
+		t.Fatal(err)
+	}
+	if st, r := status(), running(); st != "running" || r != "true" {
+		t.Errorf("after the second start: status %q, running %q", st, r)
+	}
+	if err := waitForExec(ctx, life); err != nil {
+		t.Fatal(err)
+	}
+	shellRunsCommand(ctx, t, target)
+
+	if _, err := wsm(ctx, "sandbox", "delete", target); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := findSandbox(ctx, s.a.slug, slug); err != nil || ok {
+		t.Errorf("sandbox %s still listed after delete (err %v)", target, err)
+	}
+	if _, err := asUser(ctx, life, "podman", "pod", "exists", sandbox.PodName(sb.ID)); err == nil {
+		t.Errorf("pod %s still exists", sandbox.PodName(sb.ID))
+	}
+	if _, err := asUser(ctx, life, "podman", "volume", "exists", sandbox.CodeVolume(sb.ID)); err == nil {
+		t.Errorf("volume %s still exists", sandbox.CodeVolume(sb.ID))
+	}
+	// The project's sandboxes share its home volume, so it stays.
+	if _, err := asUser(ctx, life, "podman", "volume", "exists", sandbox.HomeVolume(s.a.id)); err != nil {
+		t.Errorf("home volume of %s gone after deleting one sandbox: %v", s.a.slug, err)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -49,10 +50,10 @@ const wsmBin = "/usr/local/bin/wsm"
 
 // project is a project created for the tests, with one running sandbox.
 type project struct {
-	slug, user string
-	uid        int
-	sandboxID  string
-	container  string
+	slug, id, user string
+	uid            int
+	sandboxID      string
+	container      string
 }
 
 // suite is the state shared by the tests, set up once by TestMain.
@@ -248,7 +249,7 @@ func createProject(ctx context.Context, st *suite, slug string) (project, error)
 	}
 	for _, p := range ps {
 		if p.Slug == slug {
-			return project{slug: slug, user: p.LinuxUser, uid: p.LinuxUID}, nil
+			return project{slug: slug, id: p.ID, user: p.LinuxUser, uid: p.LinuxUID}, nil
 		}
 	}
 	return project{}, fmt.Errorf("project %s not listed after create", slug)
@@ -312,10 +313,14 @@ func createSandbox(ctx context.Context, st *suite, p *project) error {
 	}
 	p.sandboxID = sbs[0].ID
 	p.container = sandbox.WorkContainer(p.sandboxID)
-	// Wait until exec works.
+	return waitForExec(ctx, *p)
+}
+
+// waitForExec waits until exec works in p's workspace container.
+func waitForExec(ctx context.Context, p project) error {
 	deadline := time.Now().Add(60 * time.Second)
 	for {
-		_, err := inSandbox(ctx, *p, "true")
+		_, err := inSandbox(ctx, p, "true")
 		if err == nil {
 			return nil
 		}
@@ -323,6 +328,87 @@ func createSandbox(ctx context.Context, st *suite, p *project) error {
 			return err
 		}
 		time.Sleep(time.Second)
+	}
+}
+
+// findSandbox looks a sandbox up through the API.
+func findSandbox(ctx context.Context, projectSlug, slug string) (api.Sandbox, bool, error) {
+	sbs, err := s.api.Sandboxes(ctx, projectSlug)
+	if err != nil {
+		return api.Sandbox{}, false, err
+	}
+	for _, sb := range sbs {
+		if sb.Slug == slug {
+			return sb, true, nil
+		}
+	}
+	return api.Sandbox{}, false, nil
+}
+
+// lockedBuffer is a bytes.Buffer that a command writes to while the test
+// reads it.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// lastBytes returns at most the last n bytes of s, for error messages.
+func lastBytes(s string, n int) string {
+	if len(s) > n {
+		return s[len(s)-n:]
+	}
+	return s
+}
+
+// shellRunsCommand runs wsm shell on target with pipes instead of a
+// terminal, runs one command in the sandbox's tmux session and leaves the
+// shell, after which wsm shell must end on its own.
+func shellRunsCommand(ctx context.Context, t *testing.T, target string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, wsmBin, "shell", target)
+	cmd.Dir = "/"
+	cmd.WaitDelay = 5 * time.Second
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := &lockedBuffer{}
+	cmd.Stdout, cmd.Stderr = out, out
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	// Only running the command prints the marker: the echoed input shows
+	// $((6*7)), not 42. Input that arrives before tmux is ready can get
+	// lost, so the command repeats until the marker shows.
+	const marker = "wsm-shell-42"
+	deadline := time.Now().Add(60 * time.Second)
+	for !strings.Contains(out.String(), marker) {
+		if time.Now().After(deadline) {
+			cmd.Process.Kill()
+			cmd.Wait()
+			t.Fatalf("wsm shell %s: no %q in the output: %q", target, marker, lastBytes(out.String(), 2000))
+		}
+		io.WriteString(stdin, "echo wsm-shell-$((6*7))\r")
+		time.Sleep(2 * time.Second)
+	}
+	// Leaving the shell ends the tmux session, the exec and wsm shell.
+	io.WriteString(stdin, "exit\r")
+	if err := cmd.Wait(); err != nil {
+		t.Errorf("wsm shell %s did not end cleanly: %v: %q", target, err, lastBytes(out.String(), 2000))
 	}
 }
 
