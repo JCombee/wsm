@@ -92,7 +92,11 @@ func TestAppendRejectsInvalidEvents(t *testing.T) {
 		"no tool":       {Actor: "cli", Result: ResultOK},
 		"invalid json":  {Actor: "cli", Tool: "x", Result: ResultOK, Args: json.RawMessage(`{"a":`)},
 		"trailing json": {Actor: "cli", Tool: "x", Result: ResultOK, Args: json.RawMessage(`{} {}`)},
-		"too large":     {Actor: "cli", Tool: "x", Result: ResultOK, Args: json.RawMessage(`"` + strings.Repeat("a", maxArgs) + `"`)},
+		// json.Decoder.More reports false before a closing bracket, so these
+		// pass a More-based check.
+		"trailing brace":   {Actor: "cli", Tool: "x", Result: ResultOK, Args: json.RawMessage(`{"a":1}}garbage`)},
+		"trailing bracket": {Actor: "cli", Tool: "x", Result: ResultOK, Args: json.RawMessage(`[1]]`)},
+		"too large":        {Actor: "cli", Tool: "x", Result: ResultOK, Args: json.RawMessage(`"` + strings.Repeat("a", maxArgs) + `"`)},
 	} {
 		if _, err := l.Append(context.Background(), e); err == nil {
 			t.Errorf("%s: Append accepted the event", name)

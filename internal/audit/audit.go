@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/JCombee/wsm/internal/db"
@@ -98,7 +99,9 @@ func decodeStrict(raw []byte) (any, error) {
 	if err := dec.Decode(&v); err != nil {
 		return nil, fmt.Errorf("decode json: %w", err)
 	}
-	if dec.More() {
+	// Not dec.More: it reports false before a closing bracket, so "{}}"
+	// would pass. Only io.EOF proves that nothing follows the value.
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
 		return nil, errors.New("decode json: trailing data")
 	}
 	return v, nil
