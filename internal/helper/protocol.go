@@ -16,6 +16,8 @@ import (
 	"io"
 	"reflect"
 	"strings"
+
+	"github.com/JCombee/wsm/internal/projectuid"
 )
 
 // DefaultSocket is where wsm-helper listens.
@@ -23,12 +25,6 @@ const DefaultSocket = "/run/wsm/helper.sock"
 
 // MaxMessage caps a request or a response, in bytes.
 const MaxMessage = 4096
-
-// The project UID range (ADR 0004).
-const (
-	MinUID = 50000
-	MaxUID = 59999
-)
 
 // Request types.
 const (
@@ -54,9 +50,6 @@ type Response struct {
 // ever derived from the UID, never taken from input.
 func UserName(uid int) string { return fmt.Sprintf("wsm-p-%d", uid) }
 
-// ValidUID reports whether uid is in the project range.
-func ValidUID(uid int) bool { return uid >= MinUID && uid <= MaxUID }
-
 // needsUID tells for each request type whether it takes a UID.
 var needsUID = map[string]bool{
 	TypeCreateProjectUser: true,
@@ -74,8 +67,8 @@ func (r Request) Validate() error {
 	switch {
 	case want && r.UID == nil:
 		return fmt.Errorf("%s: uid is required", r.Type)
-	case want && !ValidUID(*r.UID):
-		return fmt.Errorf("%s: uid %d is outside %d-%d", r.Type, *r.UID, MinUID, MaxUID)
+	case want && !projectuid.Valid(*r.UID):
+		return fmt.Errorf("%s: uid %d is outside %d-%d", r.Type, *r.UID, projectuid.Min, projectuid.Max)
 	case !want && r.UID != nil:
 		return fmt.Errorf("%s: takes no uid", r.Type)
 	}

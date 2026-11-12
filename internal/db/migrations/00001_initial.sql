@@ -7,6 +7,7 @@ CREATE TABLE projects (
     slug        TEXT NOT NULL UNIQUE,
     name        TEXT NOT NULL,
     linux_user  TEXT NOT NULL UNIQUE,
+    -- The range of internal/projectuid; TestUIDCheckMatchesRange keeps them equal.
     linux_uid   INTEGER NOT NULL UNIQUE CHECK (linux_uid BETWEEN 50000 AND 59999),
     image_ref   TEXT NOT NULL,
     cpu_limit   INTEGER NOT NULL CHECK (cpu_limit > 0),   -- millicores

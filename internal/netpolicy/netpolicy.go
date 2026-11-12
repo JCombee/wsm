@@ -24,6 +24,8 @@ import (
 	"net/netip"
 	"slices"
 	"strings"
+
+	"github.com/JCombee/wsm/internal/projectuid"
 )
 
 // Table is the nftables table the base ruleset owns.
@@ -33,8 +35,6 @@ const Table = "inet wsm"
 const (
 	DefaultWSM0Addr = "10.255.0.1"
 	DefaultMCPPort  = 7443
-	DefaultUIDMin   = 50000
-	DefaultUIDMax   = 59999
 )
 
 // Config is the input for the base ruleset.
@@ -48,8 +48,8 @@ type Config struct {
 // DefaultConfig returns the plan's defaults with the given resolvers.
 func DefaultConfig(resolvers []netip.Addr) Config {
 	return Config{
-		UIDMin:    DefaultUIDMin,
-		UIDMax:    DefaultUIDMax,
+		UIDMin:    projectuid.Min,
+		UIDMax:    projectuid.Max,
 		WSM0Addr:  netip.MustParseAddr(DefaultWSM0Addr),
 		MCPPort:   DefaultMCPPort,
 		Resolvers: resolvers,

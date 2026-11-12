@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/JCombee/wsm/internal/netpolicy"
+	"github.com/JCombee/wsm/internal/projectuid"
 )
 
 // Fixed host locations. None of them comes from a request.
@@ -169,8 +170,8 @@ func (o *SystemOps) managerGID() (int, error) {
 // and a Podman API socket that group ManagerGroup can use (ADR 0002, 0004).
 // Running it again for an existing user finishes a partial earlier run.
 func (o *SystemOps) CreateProjectUser(ctx context.Context, uid int) error {
-	if !ValidUID(uid) {
-		return fmt.Errorf("uid %d is outside %d-%d", uid, MinUID, MaxUID)
+	if !projectuid.Valid(uid) {
+		return fmt.Errorf("uid %d is outside %d-%d", uid, projectuid.Min, projectuid.Max)
 	}
 	name := UserName(uid)
 	home := HomeDir(uid)
@@ -373,8 +374,8 @@ func waitFor(ctx context.Context, path string, timeout time.Duration) error {
 // directory and tmpfiles entry. A missing user is not an error, so a
 // partial earlier run can be finished.
 func (o *SystemOps) DeleteProjectUser(ctx context.Context, uid int) error {
-	if !ValidUID(uid) {
-		return fmt.Errorf("uid %d is outside %d-%d", uid, MinUID, MaxUID)
+	if !projectuid.Valid(uid) {
+		return fmt.Errorf("uid %d is outside %d-%d", uid, projectuid.Min, projectuid.Max)
 	}
 	name := UserName(uid)
 	u, err := lookupUser(uid)

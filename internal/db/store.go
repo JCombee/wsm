@@ -9,12 +9,8 @@ import (
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
-)
 
-// Project UIDs come from this range (ADR 0004).
-const (
-	MinProjectUID = 50000
-	MaxProjectUID = 59999
+	"github.com/JCombee/wsm/internal/projectuid"
 )
 
 // Project is one row of the projects table.
@@ -89,12 +85,12 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 			SELECT ? AS u
 			UNION ALL SELECT linux_uid + 1 FROM projects
 		) WHERE u <= ? AND u NOT IN (SELECT linux_uid FROM projects)`,
-		MinProjectUID, MaxProjectUID).Scan(&uid)
+		projectuid.Min, projectuid.Max).Scan(&uid)
 	if err != nil {
 		return fmt.Errorf("create project: allocate uid: %w", err)
 	}
 	if !uid.Valid {
-		return fmt.Errorf("create project: no free uid in %d-%d", MinProjectUID, MaxProjectUID)
+		return fmt.Errorf("create project: no free uid in %d-%d", projectuid.Min, projectuid.Max)
 	}
 	id, err := NewID()
 	if err != nil {

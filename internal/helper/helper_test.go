@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/JCombee/wsm/internal/projectuid"
 )
 
 // fakeOps records which operations ran.
@@ -164,7 +166,7 @@ func TestRejectsInvalidRequests(t *testing.T) {
 	}
 
 	// Controls: valid requests do reach the operations.
-	lo, hi := MinUID, MaxUID
+	lo, hi := projectuid.Min, projectuid.Max
 	for _, req := range []Request{
 		{Type: TypeCreateProjectUser, UID: &lo},
 		{Type: TypeDeleteProjectUser, UID: &hi},

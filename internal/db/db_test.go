@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/JCombee/wsm/internal/projectuid"
 )
 
 func openTest(t *testing.T) *Store {
@@ -67,7 +69,7 @@ func TestProjectUIDAllocation(t *testing.T) {
 	ctx := context.Background()
 	s := openTest(t)
 	var ps []*Project
-	for i, want := range []int{50000, 50001, 50002} {
+	for i, want := range []int{projectuid.Min, projectuid.Min + 1, projectuid.Min + 2} {
 		p := newProject(fmt.Sprintf("p%d", i))
 		if err := s.CreateProject(ctx, p, userName); err != nil {
 			t.Fatalf("CreateProject: %v", err)
@@ -85,8 +87,8 @@ func TestProjectUIDAllocation(t *testing.T) {
 	if err := s.CreateProject(ctx, p, userName); err != nil {
 		t.Fatal(err)
 	}
-	if p.LinuxUID != 50001 {
-		t.Errorf("reused uid = %d, want 50001", p.LinuxUID)
+	if p.LinuxUID != projectuid.Min+1 {
+		t.Errorf("reused uid = %d, want %d", p.LinuxUID, projectuid.Min+1)
 	}
 }
 
@@ -95,15 +97,42 @@ func TestProjectUIDRangeExhausted(t *testing.T) {
 	s := openTest(t)
 	// Fill the range directly; creating 10000 projects one by one is slow.
 	_, err := s.DB.Exec(`
-		WITH RECURSIVE n(u) AS (SELECT 50000 UNION ALL SELECT u + 1 FROM n WHERE u < 59999)
+		WITH RECURSIVE n(u) AS (SELECT ? UNION ALL SELECT u + 1 FROM n WHERE u < ?)
 		INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_ref,
 			cpu_limit, mem_limit, pids_limit, created_at)
-		SELECT 'id' || u, 's' || u, 'n', 'wsm-p-' || u, u, 'img', 1, 1, 1, '2026-01-01T00:00:00.000000000Z' FROM n`)
+		SELECT 'id' || u, 's' || u, 'n', 'wsm-p-' || u, u, 'img', 1, 1, 1, '2026-01-01T00:00:00.000000000Z' FROM n`,
+		projectuid.Min, projectuid.Max)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := s.CreateProject(ctx, newProject("full"), userName); err == nil {
 		t.Fatal("CreateProject succeeded with a full UID range")
+	}
+}
+
+// TestUIDCheckMatchesRange keeps the CHECK constraint on projects.linux_uid
+// equal to internal/projectuid, the range wsm-helper and the nftables rules
+// use.
+func TestUIDCheckMatchesRange(t *testing.T) {
+	s := openTest(t)
+	tests := []struct {
+		uid int
+		ok  bool
+	}{
+		{projectuid.Min - 1, false},
+		{projectuid.Min, true},
+		{projectuid.Max, true},
+		{projectuid.Max + 1, false},
+	}
+	for _, tt := range tests {
+		_, err := s.DB.Exec(`
+			INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_ref,
+				cpu_limit, mem_limit, pids_limit, created_at)
+			VALUES (?, ?, 'n', ?, ?, 'img', 1, 1, 1, '2026-01-01T00:00:00.000000000Z')`,
+			fmt.Sprint("id", tt.uid), fmt.Sprint("s", tt.uid), userName(tt.uid), tt.uid)
+		if (err == nil) != tt.ok {
+			t.Errorf("insert uid %d: err = %v, want ok = %v", tt.uid, err, tt.ok)
+		}
 	}
 }
 
