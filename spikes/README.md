@@ -8,7 +8,7 @@ the main module.
 |---|---|---|
 | `01-network` | nftables per project UID with rootless pasta pods, MariaDB on `wsm0` | `01-network/run.sh` |
 | `02-podman-api` | the manager drives a project user's Podman over its socket; exec with TTY to WebSocket; Podman bindings without cgo | `02-podman-api/run.sh` |
-| `03-mcp` | an MCP server (go-sdk) as `wsm` on `10.255.0.1:7443` with a bearer token per sandbox; Claude Code and Codex call a tool from a real sandbox via a mock model | `03-mcp/run.sh` (needs an installed wsm) |
+| `03-mcp` | an MCP server (go-sdk) as `wsm` on `10.255.0.1:7443` with a bearer token per sandbox; Claude Code and Codex call a tool from a real sandbox via a mock model. Outcome: go for M3 (ADR 0011) | `03-mcp/run.sh` (needs an installed wsm) |
 
 The scripts install packages, create users, change nftables and start
 containers. **Run them only on a disposable VM**, never on a machine with real
