@@ -15,6 +15,7 @@ import (
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/podman/podmantest"
 	"github.com/JCombee/wsm/internal/sandbox"
+	"github.com/JCombee/wsm/internal/secret"
 )
 
 type nopUsers struct{}
@@ -47,6 +48,15 @@ func okLibpod(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func testBox(t *testing.T) *secret.Box {
+	t.Helper()
+	b, err := secret.New(make([]byte, secret.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func newTestAPI(t *testing.T) (*Client, string) {
 	t.Helper()
 	sqlDB, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "wsm.db"))
@@ -57,10 +67,11 @@ func newTestAPI(t *testing.T) (*Client, string) {
 	lp := podmantest.New(t, http.HandlerFunc(okLibpod))
 	s := &Server{
 		Manager: &sandbox.Manager{
-			Store:  db.NewStore(sqlDB),
-			Users:  nopUsers{},
-			Podman: func(int) *podman.Client { return lp.Client() },
-			Logf:   t.Logf,
+			Store:   db.NewStore(sqlDB),
+			Users:   nopUsers{},
+			Podman:  func(int) *podman.Client { return lp.Client() },
+			Secrets: testBox(t),
+			Logf:    t.Logf,
 		},
 		UserName: func(uid int) string { return fmt.Sprintf("wsm-p-%d", uid) },
 		Logf:     t.Logf,
@@ -178,5 +189,55 @@ func TestRejectsInvalidBodies(t *testing.T) {
 				t.Errorf("status %d, want %d", resp.StatusCode, tt.want)
 			}
 		})
+	}
+}
+
+func TestDeployKeyRoute(t *testing.T) {
+	ctx := context.Background()
+	c, url := newTestAPI(t)
+	p, err := c.CreateProject(ctx, CreateProjectRequest{Slug: "app", Image: "img", RepoURL: "git@host:app.git"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.RepoURL != "git@host:app.git" || p.BaseBranch != "main" {
+		t.Errorf("project = %+v", p)
+	}
+	k, err := c.DeployKey(ctx, "app")
+	if err != nil || !strings.HasPrefix(k.PublicKey, "ssh-ed25519 ") || !strings.HasSuffix(k.PublicKey, " wsm-app") {
+		t.Fatalf("DeployKey = %+v, %v", k, err)
+	}
+	if _, err := c.CreateProject(ctx, CreateProjectRequest{Slug: "plain", Image: "img"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.DeployKey(ctx, "plain"); err == nil || !strings.Contains(err.Error(), "no repository") {
+		t.Errorf("DeployKey without a repository: %v", err)
+	}
+	for _, bad := range []CreateProjectRequest{
+		{Slug: "bad1", Image: "img", RepoURL: "https://github.com/a/b.git"},
+		{Slug: "bad2", Image: "img", RepoURL: "git@host:a.git", BaseBranch: "-x"},
+		{Slug: "bad3", Image: "img", BaseBranch: "main"},
+	} {
+		if _, err := c.CreateProject(ctx, bad); err == nil {
+			t.Errorf("CreateProject(%+v) succeeded", bad)
+		}
+	}
+	// No route returns the private key.
+	for _, path := range []string{"/v1/projects", "/v1/projects/app/key", "/v1/sandboxes"} {
+		resp, err := http.Get(url + path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if strings.Contains(string(body), "PRIVATE") || strings.Contains(string(body), "priv") {
+			t.Errorf("GET %s returns private key material", path)
+		}
+	}
+	if _, err := c.CreateSandbox(ctx, "app", "main"); err != nil {
+		t.Fatal(err)
+	}
+	sbs, err := c.Sandboxes(ctx, "app")
+	if err != nil || len(sbs) != 1 || sbs[0].Branch != "agent/main" {
+		t.Errorf("Sandboxes = %+v, %v", sbs, err)
 	}
 }

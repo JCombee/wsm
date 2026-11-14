@@ -1,6 +1,7 @@
 package db
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"errors"
@@ -391,4 +392,95 @@ func TestProjectImageSource(t *testing.T) {
 			t.Errorf("migrated project: %+v", got)
 		}
 	})
+}
+
+func TestProjectRepo(t *testing.T) {
+	ctx := context.Background()
+	s := openTest(t)
+	sealed := []byte{1, 2, 3, 4}
+	id, err := NewID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := newProject("app")
+	p.ID, p.RepoURL, p.BaseBranch, p.DeployKeyPub, p.DeployKeySealed =
+		id, "git@host:app.git", "main", "ssh-ed25519 AAAA wsm-app", sealed
+	if err := s.CreateProject(ctx, p, userName); err != nil {
+		t.Fatal(err)
+	}
+	if p.ID != id {
+		t.Errorf("ID = %s, want the preset %s", p.ID, id)
+	}
+	got, err := s.ProjectBySlug(ctx, "app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.RepoURL != p.RepoURL || got.BaseBranch != "main" || got.DeployKeyPub != p.DeployKeyPub || !got.HasRepo() {
+		t.Errorf("project = %+v", got)
+	}
+	if got.DeployKeySealed != nil {
+		t.Error("a scan returned the sealed deploy key")
+	}
+	if b, err := s.DeployKeySealed(ctx, id); err != nil || !bytes.Equal(b, sealed) {
+		t.Errorf("DeployKeySealed = %v, %v", b, err)
+	}
+
+	plain := newProject("plain")
+	if err := s.CreateProject(ctx, plain, userName); err != nil {
+		t.Fatal(err)
+	}
+	if plain.HasRepo() {
+		t.Error("project without a repository has one")
+	}
+	if _, err := s.DeployKeySealed(ctx, plain.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("DeployKeySealed without a repository: %v", err)
+	}
+
+	bad := []struct {
+		name string
+		mod  func(p *Project)
+	}{
+		{"repo without key", func(p *Project) { p.RepoURL, p.BaseBranch = "git@h:a.git", "main" }},
+		{"repo without branch", func(p *Project) { p.RepoURL, p.DeployKeyPub, p.DeployKeySealed = "git@h:a.git", "k", sealed }},
+		{"branch without repo", func(p *Project) { p.BaseBranch = "main" }},
+		{"key without repo", func(p *Project) { p.DeployKeyPub, p.DeployKeySealed = "k", sealed }},
+		{"invalid preset id", func(p *Project) { p.ID = "../x" }},
+	}
+	for i, tt := range bad {
+		t.Run(tt.name, func(t *testing.T) {
+			p := newProject(fmt.Sprint("bad", i))
+			tt.mod(p)
+			if err := s.CreateProject(ctx, p, userName); !errors.Is(err, ErrInvalid) {
+				t.Errorf("err = %v, want ErrInvalid", err)
+			}
+		})
+	}
+
+	// The CHECK constraints hold for writes that bypass the store.
+	_, err = s.DB.Exec(`
+		INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_ref,
+			cpu_limit, mem_limit, pids_limit, created_at, repo_url)
+		VALUES ('raw', 'raw', 'n', 'wsm-p-59999', 59999, 'img', 1, 1, 1,
+			'2026-01-01T00:00:00.000000000Z', 'git@h:a.git')`)
+	if err == nil {
+		t.Error("insert of a repository without branch and key succeeded")
+	}
+
+	sb := &Sandbox{ProjectID: id, Slug: "main", Branch: "agent/main"}
+	if err := s.CreateSandbox(ctx, sb, podName); err != nil {
+		t.Fatal(err)
+	}
+	gotSB, err := s.SandboxBySlug(ctx, id, "main")
+	if err != nil || gotSB.Branch != "agent/main" || gotSB.SeededAt != nil {
+		t.Fatalf("sandbox = %+v, %v", gotSB, err)
+	}
+	if err := s.MarkSandboxSeeded(ctx, sb.ID); err != nil {
+		t.Fatal(err)
+	}
+	if gotSB, _ = s.SandboxBySlug(ctx, id, "main"); gotSB.SeededAt == nil {
+		t.Error("SeededAt not set")
+	}
+	if err := s.MarkSandboxSeeded(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("MarkSandboxSeeded on a missing sandbox: %v", err)
+	}
 }

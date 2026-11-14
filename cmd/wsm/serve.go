@@ -14,6 +14,7 @@ import (
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/sandbox"
 	"github.com/JCombee/wsm/internal/sdsocket"
+	"github.com/JCombee/wsm/internal/secret"
 )
 
 // runServe implements "wsm serve": the manager, running as user wsm.
@@ -22,6 +23,7 @@ func runServe(e env) error {
 	dbPath := fs.String("db", defaultDB, "path to the manager database")
 	socket := fs.String("socket", api.DefaultSocket, "API socket, unless systemd passes one")
 	helperSocket := fs.String("helper-socket", helper.DefaultSocket, "wsm-helper socket")
+	keyFile := fs.String("secret-key", secret.DefaultKeyFile, "key file that seals deploy keys; created on first start")
 	if err := fs.Parse(e.args); err != nil {
 		return usageError{err.Error()}
 	}
@@ -36,6 +38,18 @@ func runServe(e env) error {
 		return err
 	}
 	defer sqlDB.Close()
+
+	// The key file is created on the first start (0600, in the state
+	// directory) and must keep that mode and size afterwards.
+	key, err := secret.LoadOrCreateKey(*keyFile)
+	if err != nil {
+		return err
+	}
+	box, err := secret.New(key)
+	clear(key)
+	if err != nil {
+		return err
+	}
 
 	hc := &helper.Client{Socket: *helperSocket}
 	// Sandboxes must never run without the egress rules, so the manager
@@ -53,7 +67,8 @@ func runServe(e env) error {
 		Podman: func(uid int) *podman.Client {
 			return podman.NewClient(helper.PodmanSocket(uid))
 		},
-		Logf: logger.Printf,
+		Secrets: box,
+		Logf:    logger.Printf,
 	}
 	srv := &http.Server{
 		Handler:           (&api.Server{Manager: mgr, UserName: helper.UserName, Logf: logger.Printf}).Handler(),

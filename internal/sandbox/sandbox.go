@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/podman"
+	"github.com/JCombee/wsm/internal/secret"
 )
 
 // The user and group the workspace runs as inside the container. The pod's
@@ -107,7 +109,10 @@ type Manager struct {
 	Users UserAdmin
 	// Podman returns a client for the Podman socket of a project UID.
 	Podman func(uid int) *podman.Client
-	Logf   func(format string, args ...any)
+	// Secrets seals deploy keys at rest (ADR 0009). Projects with a
+	// repository need it.
+	Secrets *secret.Box
+	Logf    func(format string, args ...any)
 
 	mu sync.Mutex
 }
@@ -128,6 +133,10 @@ type ProjectSpec struct {
 	CPUMillis     int64
 	MemBytes      int64
 	PidsLimit     int64
+	// RepoURL is an SSH repository, optional. BaseBranch defaults to
+	// gitmgr.DefaultBranch and needs a RepoURL.
+	RepoURL    string
+	BaseBranch string
 }
 
 // ValidSlug reports whether s is a valid project or sandbox slug.
@@ -169,11 +178,29 @@ func (s *ProjectSpec) validate() error {
 			return fmt.Errorf("%w: name contains control characters", ErrInvalid)
 		}
 	}
+	if s.RepoURL == "" {
+		if s.BaseBranch != "" {
+			return fmt.Errorf("%w: a branch needs a repository", ErrInvalid)
+		}
+	} else {
+		if s.BaseBranch == "" {
+			s.BaseBranch = gitmgr.DefaultBranch
+		}
+		if err := gitmgr.ValidRepoURL(s.RepoURL); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+		if err := gitmgr.ValidBranch(s.BaseBranch); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalid, err)
+		}
+	}
 	if s.Containerfile != "" {
 		return db.ValidContainerfile(s.Containerfile)
 	}
 	return nil
 }
+
+// SandboxBranch returns the branch a sandbox works on.
+func SandboxBranch(sandboxSlug string) string { return "agent/" + sandboxSlug }
 
 // imageSource returns the database's image source for the spec.
 func (s *ProjectSpec) imageSource() string {
@@ -200,7 +227,9 @@ func (m *Manager) job(ctx context.Context, typ, ref string, fn func() error) err
 }
 
 // CreateProject stores a project and creates its Linux user. When the user
-// cannot be created, the project is rolled back.
+// cannot be created, the project is rolled back. A project with a
+// repository gets a new deploy key; wsm does not contact the repository
+// until the first sandbox starts.
 func (m *Manager) CreateProject(ctx context.Context, spec ProjectSpec, userName func(uid int) string) (db.Project, error) {
 	if err := spec.validate(); err != nil {
 		return db.Project{}, err
@@ -211,6 +240,11 @@ func (m *Manager) CreateProject(ctx context.Context, spec ProjectSpec, userName 
 		Slug: spec.Slug, Name: spec.Name, ImageSource: spec.imageSource(),
 		ImageRef: spec.ImageRef, Containerfile: spec.Containerfile,
 		CPUMillis: spec.CPUMillis, MemBytes: spec.MemBytes, PidsLimit: spec.PidsLimit,
+	}
+	if spec.RepoURL != "" {
+		if err := m.newDeployKey(&p, spec); err != nil {
+			return db.Project{}, err
+		}
 	}
 	if err := m.Store.CreateProject(ctx, &p, userName); err != nil {
 		return p, err
@@ -230,6 +264,42 @@ func (m *Manager) CreateProject(ctx context.Context, spec ProjectSpec, userName 
 	}
 	m.logf("project %s created with uid %d", p.Slug, p.LinuxUID)
 	return p, nil
+}
+
+// newDeployKey gives p a fresh ID and a deploy key sealed for that ID.
+func (m *Manager) newDeployKey(p *db.Project, spec ProjectSpec) error {
+	if m.Secrets == nil {
+		return errors.New("no secret key: cannot store a deploy key")
+	}
+	id, err := db.NewID()
+	if err != nil {
+		return err
+	}
+	key, err := gitmgr.NewDeployKey("wsm-" + spec.Slug)
+	if err != nil {
+		return err
+	}
+	sealed, err := m.Secrets.Seal(key.Private, []byte(id))
+	clear(key.Private)
+	if err != nil {
+		return fmt.Errorf("seal deploy key: %w", err)
+	}
+	p.ID, p.RepoURL, p.BaseBranch = id, spec.RepoURL, spec.BaseBranch
+	p.DeployKeyPub, p.DeployKeySealed = key.Public, sealed
+	return nil
+}
+
+// DeployKey returns the public deploy key of a project, which the owner
+// adds to the repository. The private key never leaves the manager.
+func (m *Manager) DeployKey(ctx context.Context, projectSlug string) (string, error) {
+	p, err := m.Store.ProjectBySlug(ctx, projectSlug)
+	if err != nil {
+		return "", err
+	}
+	if !p.HasRepo() {
+		return "", fmt.Errorf("project %s has no repository: %w", projectSlug, db.ErrNotFound)
+	}
+	return p.DeployKeyPub, nil
 }
 
 // DeleteProject removes every sandbox of the project, its Podman state, its
@@ -374,6 +444,9 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 		return db.Sandbox{}, err
 	}
 	sb := db.Sandbox{ProjectID: p.ID, Slug: slug, Status: db.StatusCreated}
+	if p.HasRepo() {
+		sb.Branch = SandboxBranch(slug)
+	}
 	if err := m.Store.CreateSandbox(ctx, &sb, PodName); err != nil {
 		return sb, err
 	}

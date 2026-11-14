@@ -112,6 +112,13 @@ func (c *Client) ProjectImage(ctx context.Context, project string) (ProjectImage
 	return out, err
 }
 
+// DeployKey returns the public deploy key of a project with a repository.
+func (c *Client) DeployKey(ctx context.Context, project string) (DeployKey, error) {
+	var out DeployKey
+	err := c.do(ctx, http.MethodGet, "/v1/projects/"+url.PathEscape(project)+"/key", nil, &out)
+	return out, err
+}
+
 // DeleteProject deletes a project with all its sandboxes.
 func (c *Client) DeleteProject(ctx context.Context, project string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/projects/"+url.PathEscape(project), nil, nil)

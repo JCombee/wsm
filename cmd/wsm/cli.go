@@ -106,13 +106,19 @@ func runProject(e env) error {
 		cpus := fs.String("cpus", "", "CPU limit per sandbox, e.g. 1.5")
 		memory := fs.String("memory", "", "memory limit per sandbox, e.g. 2g")
 		pids := fs.Int64("pids", 0, "process limit per sandbox")
+		repo := fs.String("repo", "", "git repository over SSH: ssh://user@host[:port]/path or user@host:path")
+		branch := fs.String("branch", "", "base branch of the repository (default main)")
 		if err := fs.Parse(args); err != nil {
 			return usageError{err.Error()}
 		}
 		if fs.NArg() != 0 || *slug == "" || (*image == "") == (*containerfile == "") {
 			return usageError{"--slug and exactly one of --image and --containerfile are required"}
 		}
-		req := api.CreateProjectRequest{Slug: *slug, Name: *name, Image: *image, PidsLimit: *pids}
+		if *branch != "" && *repo == "" {
+			return usageError{"--branch needs --repo"}
+		}
+		req := api.CreateProjectRequest{Slug: *slug, Name: *name, Image: *image, PidsLimit: *pids,
+			RepoURL: *repo, BaseBranch: *branch}
 		var err error
 		if *containerfile != "" {
 			if req.Containerfile, err = readContainerfile(*containerfile); err != nil {
@@ -134,6 +140,20 @@ func runProject(e env) error {
 			return err
 		}
 		fmt.Fprintf(e.stdout, "project %s created (user %s, uid %d, image %s)\n", p.Slug, p.LinuxUser, p.LinuxUID, p.Image)
+		if p.RepoURL != "" {
+			fmt.Fprintf(e.stdout, "repository %s, base branch %s\n", p.RepoURL, p.BaseBranch)
+			fmt.Fprintf(e.stdout, "add the deploy key from \"wsm project key %s\" to the repository before the first sandbox starts\n", p.Slug)
+		}
+		return nil
+	case "key":
+		if len(args) != 1 {
+			return usageError{"want exactly one project"}
+		}
+		k, err := c.DeployKey(e.ctx, args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(e.stdout, k.PublicKey)
 		return nil
 	case "image":
 		if len(args) != 1 {

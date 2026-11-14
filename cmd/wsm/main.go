@@ -39,7 +39,7 @@ func commands() map[string]command {
 		}},
 		"audit":   {"audit verify [--db PATH]", runAudit},
 		"serve":   {"serve [--db PATH] [--socket PATH] [--helper-socket PATH]", runServe},
-		"project": {"project create --slug SLUG (--image REF | --containerfile PATH) [--name NAME] [--cpus N] [--memory SIZE] [--pids N] | image SLUG | list | delete SLUG", runProject},
+		"project": {"project create --slug SLUG (--image REF | --containerfile PATH) [--repo SSH-URL [--branch BASE]] [--name NAME] [--cpus N] [--memory SIZE] [--pids N] | image SLUG | key SLUG | list | delete SLUG", runProject},
 		"sandbox": {"sandbox create|start|stop|delete PROJECT/SANDBOX | list [PROJECT]", runSandbox},
 		"shell":   {"shell PROJECT/SANDBOX", runShell},
 	}

@@ -45,7 +45,33 @@ type Project struct {
 	CPUMillis     int64 // CPU limit per sandbox in millicores
 	MemBytes      int64 // memory limit per sandbox in bytes
 	PidsLimit     int64 // process limit per sandbox
-	CreatedAt     time.Time
+	// RepoURL is the project's SSH repository; empty when it has none.
+	// BaseBranch and DeployKeyPub are set exactly when RepoURL is.
+	RepoURL      string
+	BaseBranch   string
+	DeployKeyPub string
+	// DeployKeySealed is the sealed private deploy key (ADR 0009). Only
+	// CreateProject reads it; the scans leave it empty, so the sealed key
+	// travels only through DeployKeySealed.
+	DeployKeySealed []byte
+	CreatedAt       time.Time
+}
+
+// HasRepo reports whether the project has a git repository.
+func (p Project) HasRepo() bool { return p.RepoURL != "" }
+
+// checkRepo checks that a project has all repository columns or none.
+func checkRepo(p *Project) error {
+	if p.RepoURL == "" {
+		if p.BaseBranch != "" || p.DeployKeyPub != "" || len(p.DeployKeySealed) != 0 {
+			return fmt.Errorf("%w: branch or deploy key without a repository", ErrInvalid)
+		}
+		return nil
+	}
+	if p.BaseBranch == "" || p.DeployKeyPub == "" || len(p.DeployKeySealed) == 0 {
+		return fmt.Errorf("%w: a repository needs a base branch and a deploy key", ErrInvalid)
+	}
+	return nil
 }
 
 // ValidContainerfile checks a Containerfile: not empty, at most
@@ -99,6 +125,10 @@ type Sandbox struct {
 	PodName        string
 	CreatedAt      time.Time
 	LastActivityAt *time.Time
+	// Branch is agent/<slug> when the project has a repository.
+	Branch string
+	// SeededAt is when the code arrived in /workspace; nil until then.
+	SeededAt *time.Time
 }
 
 // Store reads and writes projects, sandboxes and jobs.
@@ -125,14 +155,21 @@ func mapErr(err error) error {
 }
 
 // CreateProject inserts p with the lowest free UID from the project range.
-// userName derives the Linux user name from that UID; p.ID, p.LinuxUID,
-// p.LinuxUser and p.CreatedAt are filled in.
+// userName derives the Linux user name from that UID; p.LinuxUID,
+// p.LinuxUser and p.CreatedAt are filled in, and p.ID unless it is set
+// already (a sealed deploy key is bound to the ID before the insert).
 func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid int) string) error {
 	if p.ImageSource == "" {
 		p.ImageSource = ImageSourceRegistry
 	}
 	if err := checkImageSource(p); err != nil {
 		return fmt.Errorf("create project %q: %w", p.Slug, err)
+	}
+	if err := checkRepo(p); err != nil {
+		return fmt.Errorf("create project %q: %w", p.Slug, err)
+	}
+	if p.ID != "" && !ValidID(p.ID) {
+		return fmt.Errorf("create project %q: %w: id %q", p.Slug, ErrInvalid, p.ID)
 	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -153,21 +190,25 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 	if !uid.Valid {
 		return fmt.Errorf("create project: no free uid in %d-%d", projectuid.Min, projectuid.Max)
 	}
-	id, err := NewID()
-	if err != nil {
-		return err
+	if p.ID == "" {
+		id, err := NewID()
+		if err != nil {
+			return err
+		}
+		p.ID = id
 	}
-	p.ID = id
 	p.LinuxUID = int(uid.Int64)
 	p.LinuxUser = userName(p.LinuxUID)
 	p.CreatedAt = s.Now().UTC()
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_source,
-			image_ref, containerfile, cpu_limit, mem_limit, pids_limit, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			image_ref, containerfile, cpu_limit, mem_limit, pids_limit, created_at,
+			repo_url, base_branch, deploy_key_pub, deploy_key_priv_enc)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Slug, p.Name, p.LinuxUser, p.LinuxUID, p.ImageSource,
 		p.ImageRef, nullString(p.Containerfile), p.CPUMillis, p.MemBytes, p.PidsLimit,
-		formatTime(p.CreatedAt))
+		formatTime(p.CreatedAt), nullString(p.RepoURL), nullString(p.BaseBranch),
+		nullString(p.DeployKeyPub), nullBytes(p.DeployKeySealed))
 	if err != nil {
 		return fmt.Errorf("create project %q: %w", p.Slug, mapErr(err))
 	}
@@ -179,18 +220,28 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 
 func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
 
+func nullBytes(b []byte) any {
+	if len(b) == 0 {
+		return nil
+	}
+	return b
+}
+
 const projectColumns = `id, slug, name, linux_user, linux_uid, image_source, image_ref,
-	containerfile, cpu_limit, mem_limit, pids_limit, created_at`
+	containerfile, cpu_limit, mem_limit, pids_limit, created_at,
+	repo_url, base_branch, deploy_key_pub`
 
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var created string
-	var containerfile sql.NullString
+	var containerfile, repo, branch, pub sql.NullString
 	if err := row.Scan(&p.ID, &p.Slug, &p.Name, &p.LinuxUser, &p.LinuxUID, &p.ImageSource,
-		&p.ImageRef, &containerfile, &p.CPUMillis, &p.MemBytes, &p.PidsLimit, &created); err != nil {
+		&p.ImageRef, &containerfile, &p.CPUMillis, &p.MemBytes, &p.PidsLimit, &created,
+		&repo, &branch, &pub); err != nil {
 		return p, mapErr(err)
 	}
 	p.Containerfile = containerfile.String
+	p.RepoURL, p.BaseBranch, p.DeployKeyPub = repo.String, branch.String, pub.String
 	t, err := parseTime(created)
 	if err != nil {
 		return p, err
@@ -217,6 +268,20 @@ func (s *Store) ProjectByID(ctx context.Context, id string) (Project, error) {
 		return p, fmt.Errorf("project %s: %w", id, err)
 	}
 	return p, nil
+}
+
+// DeployKeySealed returns the sealed private deploy key of a project with
+// a repository.
+func (s *Store) DeployKeySealed(ctx context.Context, projectID string) ([]byte, error) {
+	var b []byte
+	err := s.DB.QueryRowContext(ctx, `SELECT deploy_key_priv_enc FROM projects WHERE id = ?`, projectID).Scan(&b)
+	if err != nil {
+		return nil, fmt.Errorf("deploy key of project %s: %w", projectID, mapErr(err))
+	}
+	if len(b) == 0 {
+		return nil, fmt.Errorf("deploy key of project %s: %w", projectID, ErrNotFound)
+	}
+	return b, nil
 }
 
 // Projects returns all projects ordered by slug.
@@ -266,24 +331,34 @@ func (s *Store) CreateSandbox(ctx context.Context, sb *Sandbox, podName func(id 
 		sb.Status = StatusCreated
 	}
 	_, err = s.DB.ExecContext(ctx, `
-		INSERT INTO sandboxes (id, project_id, slug, status, pod_name, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)`,
-		sb.ID, sb.ProjectID, sb.Slug, sb.Status, sb.PodName, formatTime(sb.CreatedAt))
+		INSERT INTO sandboxes (id, project_id, slug, status, pod_name, created_at, branch)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		sb.ID, sb.ProjectID, sb.Slug, sb.Status, sb.PodName, formatTime(sb.CreatedAt),
+		nullString(sb.Branch))
 	if err != nil {
 		return fmt.Errorf("create sandbox %q: %w", sb.Slug, mapErr(err))
 	}
 	return nil
 }
 
-const sandboxColumns = `id, project_id, slug, status, pod_name, created_at, last_activity_at`
+const sandboxColumns = `id, project_id, slug, status, pod_name, created_at, last_activity_at,
+	branch, seeded_at`
 
 func scanSandbox(row interface{ Scan(...any) error }) (Sandbox, error) {
 	var sb Sandbox
 	var created string
-	var activity sql.NullString
+	var activity, branch, seeded sql.NullString
 	if err := row.Scan(&sb.ID, &sb.ProjectID, &sb.Slug, &sb.Status, &sb.PodName,
-		&created, &activity); err != nil {
+		&created, &activity, &branch, &seeded); err != nil {
 		return sb, mapErr(err)
+	}
+	sb.Branch = branch.String
+	if seeded.Valid {
+		t, err := parseTime(seeded.String)
+		if err != nil {
+			return sb, err
+		}
+		sb.SeededAt = &t
 	}
 	t, err := parseTime(created)
 	if err != nil {
@@ -348,6 +423,19 @@ func (s *Store) SetSandboxStatus(ctx context.Context, id, status string) error {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("set sandbox %s status: %w", id, ErrNotFound)
+	}
+	return nil
+}
+
+// MarkSandboxSeeded records that the code arrived in a sandbox.
+func (s *Store) MarkSandboxSeeded(ctx context.Context, id string) error {
+	res, err := s.DB.ExecContext(ctx, `UPDATE sandboxes SET seeded_at = ? WHERE id = ?`,
+		formatTime(s.Now()), id)
+	if err != nil {
+		return fmt.Errorf("mark sandbox %s seeded: %w", id, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("mark sandbox %s seeded: %w", id, ErrNotFound)
 	}
 	return nil
 }

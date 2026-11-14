@@ -42,20 +42,31 @@ type Project struct {
 	ImageSource string `json:"image_source"`
 	// Image is the image sandboxes run: the registry reference, or the tag
 	// wsm builds from the Containerfile.
-	Image     string    `json:"image"`
-	CPUMillis int64     `json:"cpu_millis"`
-	MemBytes  int64     `json:"mem_bytes"`
-	PidsLimit int64     `json:"pids_limit"`
-	CreatedAt time.Time `json:"created_at"`
+	Image     string `json:"image"`
+	CPUMillis int64  `json:"cpu_millis"`
+	MemBytes  int64  `json:"mem_bytes"`
+	PidsLimit int64  `json:"pids_limit"`
+	// RepoURL and BaseBranch are empty for a project without a repository.
+	RepoURL    string    `json:"repo_url,omitempty"`
+	BaseBranch string    `json:"base_branch,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
+// DeployKey is the response of GET /v1/projects/{project}/key: the public
+// part only.
+type DeployKey struct {
+	PublicKey string `json:"public_key"`
 }
 
 // Sandbox is a sandbox in API responses.
 type Sandbox struct {
-	ID        string    `json:"id"`
-	Project   string    `json:"project"`
-	Slug      string    `json:"slug"`
-	Status    string    `json:"status"`
-	Pod       string    `json:"pod"`
+	ID      string `json:"id"`
+	Project string `json:"project"`
+	Slug    string `json:"slug"`
+	Status  string `json:"status"`
+	Pod     string `json:"pod"`
+	// Branch is agent/<slug> in a project with a repository.
+	Branch    string    `json:"branch,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 }
 
@@ -69,6 +80,9 @@ type CreateProjectRequest struct {
 	CPUMillis     int64  `json:"cpu_millis,omitempty"`
 	MemBytes      int64  `json:"mem_bytes,omitempty"`
 	PidsLimit     int64  `json:"pids_limit,omitempty"`
+	// RepoURL is an SSH repository; BaseBranch defaults to main.
+	RepoURL    string `json:"repo_url,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
 }
 
 // ProjectImage is the response of POST /v1/projects/{project}/image.
@@ -108,6 +122,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/projects", s.createProject)
 	mux.HandleFunc("DELETE /v1/projects/{project}", s.deleteProject)
 	mux.HandleFunc("POST /v1/projects/{project}/image", s.projectImage)
+	mux.HandleFunc("GET /v1/projects/{project}/key", s.deployKey)
 	mux.HandleFunc("GET /v1/sandboxes", s.listSandboxes)
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes", s.createSandbox)
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes/{sandbox}/start", s.startSandbox)
@@ -163,13 +178,13 @@ func toProject(p db.Project) Project {
 	return Project{
 		ID: p.ID, Slug: p.Slug, Name: p.Name, LinuxUser: p.LinuxUser, LinuxUID: p.LinuxUID,
 		ImageSource: p.ImageSource, Image: sandbox.ProjectImage(p), CPUMillis: p.CPUMillis, MemBytes: p.MemBytes, PidsLimit: p.PidsLimit,
-		CreatedAt: p.CreatedAt,
+		RepoURL: p.RepoURL, BaseBranch: p.BaseBranch, CreatedAt: p.CreatedAt,
 	}
 }
 
 func toSandbox(projectSlug string, sb db.Sandbox) Sandbox {
 	return Sandbox{ID: sb.ID, Project: projectSlug, Slug: sb.Slug, Status: sb.Status,
-		Pod: sb.PodName, CreatedAt: sb.CreatedAt}
+		Pod: sb.PodName, Branch: sb.Branch, CreatedAt: sb.CreatedAt}
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -194,6 +209,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	p, err := s.Manager.CreateProject(r.Context(), sandbox.ProjectSpec{
 		Slug: req.Slug, Name: req.Name, ImageRef: req.Image, Containerfile: req.Containerfile,
 		CPUMillis: req.CPUMillis, MemBytes: req.MemBytes, PidsLimit: req.PidsLimit,
+		RepoURL: req.RepoURL, BaseBranch: req.BaseBranch,
 	}, s.UserName)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -218,6 +234,16 @@ func (s *Server) projectImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ProjectImage{Image: ref, ID: id})
+}
+
+// deployKey returns the public part of a project's deploy key.
+func (s *Server) deployKey(w http.ResponseWriter, r *http.Request) {
+	pub, err := s.Manager.DeployKey(r.Context(), r.PathValue("project"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, DeployKey{PublicKey: pub})
 }
 
 func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
