@@ -134,12 +134,13 @@ func TestBearerAuth(t *testing.T) {
 		name  string
 		authz string
 		want  int
+		auth  string
 	}{
-		{"no token", "", http.StatusUnauthorized},
-		{"wrong token", "Bearer not-a-real-token", http.StatusUnauthorized},
-		{"wrong scheme", "Basic " + tokenA, http.StatusUnauthorized},
-		{"token without scheme", tokenA, http.StatusUnauthorized},
-		{"good token", "Bearer " + tokenA, http.StatusOK},
+		{"no token", "", http.StatusUnauthorized, "none"},
+		{"wrong token", "Bearer not-a-real-token", http.StatusUnauthorized, "bearer"},
+		{"wrong scheme", "Basic " + tokenA, http.StatusUnauthorized, "other"},
+		{"token without scheme", tokenA, http.StatusUnauthorized, "other"},
+		{"good token", "Bearer " + tokenA, http.StatusOK, "bearer"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -157,7 +158,7 @@ func TestBearerAuth(t *testing.T) {
 			if tt.want == http.StatusOK {
 				wantDecision, wantSandbox = "allow", idA
 			}
-			if r.Status != tt.want || r.Decision != wantDecision || r.Sandbox != wantSandbox || r.RPCMethod != "initialize" {
+			if r.Status != tt.want || r.Decision != wantDecision || r.Sandbox != wantSandbox || r.RPCMethod != "initialize" || r.Auth != tt.auth {
 				t.Errorf("audit record %+v", r)
 			}
 		})

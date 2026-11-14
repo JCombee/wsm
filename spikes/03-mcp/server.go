@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/auth"
@@ -108,6 +110,9 @@ type serverOptions struct {
 	Stateless bool
 	Audit     AuditWriter
 	Logf      func(format string, args ...any)
+	// Seen, when set, counts every HTTP request on arrival, independently
+	// of the audit path, so a run can compare it with the audit log.
+	Seen *atomic.Int64
 }
 
 type auditKey struct{}
@@ -160,12 +165,16 @@ func newHandler(tokens []tokenEntry, opts serverOptions) http.Handler {
 	})
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if opts.Seen != nil {
+			opts.Seen.Add(1)
+		}
 		rec := &Record{
 			Time:     time.Now().UTC(),
 			Method:   r.Method,
 			Path:     r.URL.Path,
 			Protocol: r.Header.Get("Mcp-Protocol-Version"),
 			Session:  r.Header.Get("Mcp-Session-Id") != "",
+			Auth:     authKind(r.Header.Get("Authorization")),
 		}
 		aw := &auditingWriter{ResponseWriter: w, audit: opts.Audit, rec: rec, errLogf: opts.Logf}
 		if r.Body != nil && r.Method == http.MethodPost {
@@ -188,6 +197,18 @@ func newHandler(tokens []tokenEntry, opts serverOptions) http.Handler {
 		// response goes out.
 		aw.commit(http.StatusOK)
 	})
+}
+
+// authKind classifies an Authorization header without keeping its value.
+func authKind(h string) string {
+	switch {
+	case h == "":
+		return "none"
+	case len(h) > 7 && strings.EqualFold(h[:7], "bearer "):
+		return "bearer"
+	default:
+		return "other"
+	}
 }
 
 // policyDeny returns why a call is denied, or "" when it is allowed.
@@ -310,8 +331,9 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	defer audit.Close()
 	logger := log.New(stderr, "mcpspike serve: ", log.LstdFlags)
+	var seen atomic.Int64
 	srv := &http.Server{
-		Handler:           newHandler(tokens, serverOptions{Stateless: *stateless, Audit: audit, Logf: logger.Printf}),
+		Handler:           newHandler(tokens, serverOptions{Stateless: *stateless, Audit: audit, Logf: logger.Printf, Seen: &seen}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		// Long enough for an SSE stream; clients reconnect after it.
@@ -339,7 +361,8 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(sctx)
-	logger.Printf("stopped")
+	// run.sh compares this count with the number of audit lines.
+	logger.Printf("stopped requests_seen=%d", seen.Load())
 	return nil
 }
 

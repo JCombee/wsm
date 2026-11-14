@@ -1,0 +1,16 @@
+# Agent image for spike 03-mcp: Claude Code and Codex, pinned to the versions
+# of the preflight, on top of the project image requirements of plan section
+# 3.8 (tmux, git, bash, user 1000 with home /home/agent). wsm builds it as
+# the project user (ADR 0008).
+FROM docker.io/library/debian:trixie-slim
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends bash tmux git ca-certificates nodejs npm \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g @anthropic-ai/claude-code@2.1.325 @openai/codex@0.169.0 \
+ && npm cache clean --force \
+ && groupadd --gid 1000 agent \
+ && useradd --uid 1000 --gid 1000 --home-dir /home/agent --create-home --shell /bin/bash agent \
+ && install -d -o 1000 -g 1000 /workspace
+WORKDIR /workspace
+# The debian base image has CMD bash, which exits at once without a TTY.
+CMD ["sleep", "infinity"]

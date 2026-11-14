@@ -24,6 +24,8 @@ type Record struct {
 	// Session tells whether the request carried a session ID; the ID itself
 	// is not logged.
 	Session bool `json:"session"`
+	// Auth is the kind of Authorization header: none, bearer or other.
+	Auth string `json:"auth"`
 	// Sandbox is the identity derived from the token; empty when the token
 	// was missing or wrong.
 	Sandbox  string `json:"sandbox,omitempty"`
