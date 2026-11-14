@@ -59,7 +59,7 @@ if ((PACKAGES)); then
 	log "installing packages"
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -q
-	apt-get install -y -q podman passt uidmap dbus-user-session catatonit \
+	apt-get install -y -q podman passt uidmap dbus-user-session catatonit git openssh-client \
 		nftables iproute2 systemd
 fi
 
