@@ -105,7 +105,10 @@ func removeOrigin(ctx context.Context) {
 // running sandbox, seeded on its first start.
 func setupGit(ctx context.Context) (*gitFixture, error) {
 	removeOrigin(ctx)
-	if _, err := run(ctx, "useradd", "--create-home", "--shell", "/usr/bin/git-shell", originUser); err != nil {
+	// A system user: a regular useradd takes the highest UID plus one,
+	// which lands in the project range after the first projects.
+	if _, err := run(ctx, "useradd", "--system", "--create-home", "--home-dir", originHome,
+		"--shell", "/usr/bin/git-shell", originUser); err != nil {
 		return nil, err
 	}
 	// A usable account without a password: "!" would lock it for sshd.
