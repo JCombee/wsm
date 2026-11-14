@@ -175,7 +175,8 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, in, 
 	if resp.StatusCode >= 300 && resp.StatusCode != http.StatusNotModified {
 		return fmt.Errorf("%s %s: %w", method, path, parseAPIError(resp.StatusCode, data))
 	}
-	if out == nil {
+	// 304 Not Modified (e.g. starting a running pod) has no body.
+	if out == nil || resp.StatusCode == http.StatusNotModified {
 		return nil
 	}
 	if err := decode(data, out); err != nil {
@@ -412,6 +413,19 @@ func (c *Client) ExecResize(ctx context.Context, id string, rows, cols int) erro
 	return c.do(ctx, http.MethodPost, "/exec/"+url.PathEscape(id)+"/resize", q, nil, nil)
 }
 
+// ExecState is the subset of exec inspect output wsm reads.
+type ExecState struct {
+	Running  bool `json:"Running"`
+	ExitCode int  `json:"ExitCode"`
+}
+
+// ExecInspect returns the state of an exec session.
+func (c *Client) ExecInspect(ctx context.Context, id string) (ExecState, error) {
+	var s ExecState
+	err := c.do(ctx, http.MethodGet, "/exec/"+url.PathEscape(id)+"/json", nil, nil, &s)
+	return s, err
+}
+
 // hijackedConn is the raw connection after Podman switched protocols. Reads
 // go through the bufio.Reader that parsed the response head, so bytes it
 // already buffered are not lost.
@@ -421,6 +435,15 @@ type hijackedConn struct {
 }
 
 func (h *hijackedConn) Read(p []byte) (int, error) { return h.r.Read(p) }
+
+// CloseWrite closes the write side only, which ends the process's stdin.
+// Unix and TCP connections support it.
+func (h *hijackedConn) CloseWrite() error {
+	if cw, ok := h.Conn.(halfCloser); ok {
+		return cw.CloseWrite()
+	}
+	return errors.New("connection cannot half-close")
+}
 
 // hijack sends a POST and returns the connection once Podman answers with
 // 101 Switching Protocols or 200 OK, after which the stream starts.

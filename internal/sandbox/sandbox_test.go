@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -18,8 +19,10 @@ import (
 	"testing"
 
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/podman/podmantest"
+	"github.com/JCombee/wsm/internal/secret"
 )
 
 type fakeUsers struct {
@@ -63,12 +66,33 @@ type fakeLibpod struct {
 	imageCmd        []string
 	imageEntrypoint []string
 	failCreate      bool
+	// execs holds every exec's command, joined by spaces, in order.
+	execs []string
+	// execStdin holds the stdin of every exec that attached one.
+	execStdin map[int][]byte
+	// execFail maps the first two words of a command to its exit code
+	// and stderr.
+	execFail    map[string]execOutcome
+	execByID    map[string]execCall
+	podsStopped []string
+}
+
+type execOutcome struct {
+	code   int
+	stderr string
+}
+
+type execCall struct {
+	n     int
+	cmd   []string
+	stdin bool
 }
 
 func newFakeLibpod() *fakeLibpod {
 	return &fakeLibpod{
 		bodies: map[string]map[string]any{}, pods: map[string]bool{}, volumes: map[string]bool{},
 		anyImage: true, images: map[string]bool{}, builds: map[string][]string{},
+		execStdin: map[int][]byte{}, execFail: map[string]execOutcome{}, execByID: map[string]execCall{},
 	}
 }
 
@@ -204,7 +228,41 @@ func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			notFound()
 			return
 		}
+		if parts[2] == "stop" {
+			f.podsStopped = append(f.podsStopped, parts[1])
+		}
 		io.WriteString(w, `{"Errs":[],"Id":"podid"}`)
+	case len(parts) == 3 && parts[0] == "containers" && parts[2] == "exec":
+		var cfg struct {
+			Cmd         []string
+			AttachStdin bool
+		}
+		json.Unmarshal(data, &cfg)
+		id := fmt.Sprintf("exec%d", len(f.execs))
+		f.execByID[id] = execCall{n: len(f.execs), cmd: cfg.Cmd, stdin: cfg.AttachStdin}
+		f.execs = append(f.execs, strings.Join(cfg.Cmd, " "))
+		w.WriteHeader(http.StatusCreated)
+		fmt.Fprintf(w, `{"Id":%q}`, id)
+	case len(parts) == 3 && parts[0] == "exec" && parts[2] == "start":
+		call := f.execByID[parts[1]]
+		conn, brw, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		io.WriteString(conn, "HTTP/1.1 101 UPGRADED\r\nContent-Type: application/vnd.docker.raw-stream\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\n")
+		if call.stdin {
+			f.execStdin[call.n], _ = io.ReadAll(brw)
+		}
+		if o, ok := f.execFail[firstWords(call.cmd)]; ok && o.stderr != "" {
+			hdr := make([]byte, 8)
+			hdr[0] = 2
+			binary.BigEndian.PutUint32(hdr[4:], uint32(len(o.stderr)))
+			conn.Write(append(hdr, o.stderr...))
+		}
+	case len(parts) == 3 && parts[0] == "exec" && parts[2] == "json":
+		call := f.execByID[parts[1]]
+		fmt.Fprintf(w, `{"Running":false,"ExitCode":%d}`, f.execFail[firstWords(call.cmd)].code)
 	case len(parts) == 2 && parts[0] == "pods" && r.Method == http.MethodDelete:
 		if !f.pods[parts[1]] {
 			notFound()
@@ -218,6 +276,51 @@ func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// firstWords returns the first two words of a command.
+func firstWords(cmd []string) string {
+	if len(cmd) < 2 {
+		return strings.Join(cmd, " ")
+	}
+	return cmd[0] + " " + cmd[1]
+}
+
+// fakeMirrors records mirror calls and serves a fixed bundle.
+type fakeMirrors struct {
+	mu         sync.Mutex
+	updates    []gitmgr.Repo
+	bundles    []string
+	removed    []string
+	bundle     []byte
+	failUpdate bool
+}
+
+func (f *fakeMirrors) Update(_ context.Context, r gitmgr.Repo) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	r.Key = bytes.Clone(r.Key)
+	f.updates = append(f.updates, r)
+	if f.failUpdate {
+		return errors.New("git fetch: exit status 128: Permission denied (publickey)")
+	}
+	return nil
+}
+
+func (f *fakeMirrors) Bundle(_ context.Context, projectID, branch string, w io.Writer) error {
+	f.mu.Lock()
+	f.bundles = append(f.bundles, projectID+" "+branch)
+	b := f.bundle
+	f.mu.Unlock()
+	_, err := w.Write(b)
+	return err
+}
+
+func (f *fakeMirrors) Remove(projectID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.removed = append(f.removed, projectID)
+	return nil
+}
+
 func newManager(t *testing.T) (*Manager, *fakeUsers, *fakeLibpod) {
 	t.Helper()
 	ctx := context.Background()
@@ -229,11 +332,17 @@ func newManager(t *testing.T) (*Manager, *fakeUsers, *fakeLibpod) {
 	lp := newFakeLibpod()
 	srv := podmantest.New(t, lp)
 	users := &fakeUsers{}
+	box, err := secret.New(bytes.Repeat([]byte{7}, secret.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
 	m := &Manager{
-		Store:  db.NewStore(sqlDB),
-		Users:  users,
-		Podman: func(int) *podman.Client { return srv.Client() },
-		Logf:   t.Logf,
+		Store:   db.NewStore(sqlDB),
+		Users:   users,
+		Podman:  func(int) *podman.Client { return srv.Client() },
+		Secrets: box,
+		Mirrors: &fakeMirrors{bundle: []byte("# v2 git bundle\nfake bundle data\n")},
+		Logf:    t.Logf,
 	}
 	return m, users, lp
 }
@@ -651,5 +760,165 @@ func TestCreateProjectRollsBack(t *testing.T) {
 	}
 	if ps, _ := m.Projects(ctx); len(ps) != 0 {
 		t.Errorf("project left: %+v", ps)
+	}
+}
+
+func TestSeedSandbox(t *testing.T) {
+	ctx := context.Background()
+	m, _, lp := newManager(t)
+	mirrors := m.Mirrors.(*fakeMirrors)
+	p, err := m.CreateProject(ctx, ProjectSpec{Slug: "app", ImageRef: "img",
+		RepoURL: "git@git.example.com:team/app.git", BaseBranch: "develop"}, userName)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mirrors.updates) != 0 {
+		t.Fatal("project create contacted the origin")
+	}
+	sb, err := m.CreateSandbox(ctx, "app", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sb.Branch != "agent/main" {
+		t.Errorf("branch = %q", sb.Branch)
+	}
+	if env, _ := lp.bodies["container"]["env"].(map[string]any); env["WSM_BRANCH"] != "agent/main" {
+		t.Errorf("container env = %v", env)
+	}
+	if len(lp.execs) != 0 || len(mirrors.updates) != 0 {
+		t.Fatalf("sandbox create seeded: execs %v updates %d", lp.execs, len(mirrors.updates))
+	}
+
+	// The first seed fails in the container: /workspace is not empty.
+	lp.execFail["git clone"] = execOutcome{128, "fatal: destination path '/workspace' already exists and is not an empty directory.\x1b[2J\n"}
+	err = m.StartSandbox(ctx, "app", "main")
+	if err == nil || !strings.Contains(err.Error(), "not an empty directory") || !strings.Contains(err.Error(), "re-create the sandbox") {
+		t.Fatalf("StartSandbox = %v, want the clone error and the re-create hint", err)
+	}
+	if strings.Contains(err.Error(), "\x1b") {
+		t.Errorf("error passes a control character: %q", err)
+	}
+	got, _ := m.Store.SandboxBySlug(ctx, p.ID, "main")
+	if got.Status != db.StatusFailed || got.SeededAt != nil {
+		t.Errorf("after a failed seed: status %s seeded %v", got.Status, got.SeededAt)
+	}
+	if fmt.Sprint(lp.podsStopped) != "[sbx-"+sb.ID+"]" {
+		t.Errorf("pods stopped = %v, want the sandbox's pod", lp.podsStopped)
+	}
+	wantFailed := []string{
+		"true",
+		"dd of=/tmp/.wsm-seed.bundle status=none",
+		"git clone --quiet --branch develop /tmp/.wsm-seed.bundle /workspace",
+		"rm -f /tmp/.wsm-seed.bundle",
+	}
+	if fmt.Sprint(lp.execs) != fmt.Sprint(wantFailed) {
+		t.Errorf("execs = %q\nwant %q", lp.execs, wantFailed)
+	}
+
+	// The next start tries again, and succeeds.
+	delete(lp.execFail, "git clone")
+	lp.execs, lp.execStdin = nil, map[int][]byte{}
+	if err := m.StartSandbox(ctx, "app", "main"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"true",
+		"dd of=/tmp/.wsm-seed.bundle status=none",
+		"git clone --quiet --branch develop /tmp/.wsm-seed.bundle /workspace",
+		"git -C /workspace switch --quiet --create agent/main",
+		"git -C /workspace remote remove origin",
+		"rm -f /tmp/.wsm-seed.bundle",
+	}
+	if fmt.Sprint(lp.execs) != fmt.Sprint(want) {
+		t.Errorf("execs = %q\nwant %q", lp.execs, want)
+	}
+	if string(lp.execStdin[1]) != string(mirrors.bundle) {
+		t.Errorf("dd got stdin %q, want the bundle", lp.execStdin[1])
+	}
+	if len(lp.execStdin) != 1 {
+		t.Errorf("stdin attached to %d execs, want only dd", len(lp.execStdin))
+	}
+	for _, call := range lp.execByID {
+		if call.cmd[0] == "sh" || call.cmd[0] == "bash" {
+			t.Errorf("exec through a shell: %q", call.cmd)
+		}
+	}
+	got, _ = m.Store.SandboxBySlug(ctx, p.ID, "main")
+	if got.Status != db.StatusRunning || got.SeededAt == nil {
+		t.Errorf("after the seed: status %s seeded %v", got.Status, got.SeededAt)
+	}
+	if len(mirrors.updates) != 2 {
+		t.Fatalf("mirror updates = %d, want one per seed attempt", len(mirrors.updates))
+	}
+	u := mirrors.updates[1]
+	if u.ProjectID != p.ID || u.URL != p.RepoURL || !strings.HasPrefix(string(u.Key), "-----BEGIN OPENSSH PRIVATE KEY-----") {
+		t.Errorf("update = %s %s, key ok %v", u.ProjectID, u.URL, strings.HasPrefix(string(u.Key), "-----BEGIN OPENSSH"))
+	}
+	if mirrors.bundles[len(mirrors.bundles)-1] != p.ID+" develop" {
+		t.Errorf("bundles = %v", mirrors.bundles)
+	}
+
+	// A seeded sandbox is not seeded again.
+	lp.execs = nil
+	if err := m.StopSandbox(ctx, "app", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.StartSandbox(ctx, "app", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if len(lp.execs) != 0 || len(mirrors.updates) != 2 {
+		t.Errorf("second start seeded again: execs %v updates %d", lp.execs, len(mirrors.updates))
+	}
+
+	// A failing mirror update fails the start before any exec.
+	if _, err := m.CreateSandbox(ctx, "app", "second"); err != nil {
+		t.Fatal(err)
+	}
+	mirrors.failUpdate = true
+	if err := m.StartSandbox(ctx, "app", "second"); err == nil || !strings.Contains(err.Error(), "Permission denied") {
+		t.Errorf("StartSandbox with a failing mirror = %v", err)
+	}
+	if len(lp.execs) != 0 {
+		t.Errorf("execs after a failed mirror update: %v", lp.execs)
+	}
+	sb2, _ := m.Store.SandboxBySlug(ctx, p.ID, "second")
+	if sb2.Status != db.StatusFailed {
+		t.Errorf("status = %s, want failed", sb2.Status)
+	}
+
+	// Deleting the project removes its mirror.
+	if err := m.DeleteProject(ctx, "app"); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(mirrors.removed) != "["+p.ID+"]" {
+		t.Errorf("mirrors removed = %v", mirrors.removed)
+	}
+}
+
+// TestNoSeedWithoutRepo checks that a project without a repository starts
+// without any exec and has no WSM_BRANCH.
+func TestNoSeedWithoutRepo(t *testing.T) {
+	ctx := context.Background()
+	m, _, lp := newManager(t)
+	if _, err := m.CreateProject(ctx, ProjectSpec{Slug: "app", ImageRef: "img"}, userName); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.CreateSandbox(ctx, "app", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if env, _ := lp.bodies["container"]["env"].(map[string]any); env["WSM_BRANCH"] != nil {
+		t.Errorf("WSM_BRANCH set without a repository: %v", env)
+	}
+	if err := m.StartSandbox(ctx, "app", "main"); err != nil {
+		t.Fatal(err)
+	}
+	if len(lp.execs) != 0 || len(m.Mirrors.(*fakeMirrors).updates) != 0 {
+		t.Errorf("seeded without a repository: %v", lp.execs)
+	}
+	if err := m.DeleteProject(ctx, "app"); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(m.Mirrors.(*fakeMirrors).removed); n != 0 {
+		t.Errorf("mirror removed for a project without a repository")
 	}
 }

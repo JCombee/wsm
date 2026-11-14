@@ -402,17 +402,13 @@ func workCommand(cfg podman.ImageConfig) []string {
 // code volume and the project's home volume; there are no host mounts.
 func WorkSpec(p db.Project, sb db.Sandbox, cmd []string) podman.ContainerSpec {
 	return podman.ContainerSpec{
-		Name:    WorkContainer(sb.ID),
-		Image:   ProjectImage(p),
-		Pod:     PodName(sb.ID),
-		Labels:  labels(p, sb),
-		User:    strconv.Itoa(ContainerUID) + ":" + strconv.Itoa(ContainerGID),
-		Command: cmd,
-		Env: map[string]string{
-			"WSM_PROJECT": p.Slug,
-			"WSM_SANDBOX": sb.Slug,
-			"HOME":        HomeDir,
-		},
+		Name:            WorkContainer(sb.ID),
+		Image:           ProjectImage(p),
+		Pod:             PodName(sb.ID),
+		Labels:          labels(p, sb),
+		User:            strconv.Itoa(ContainerUID) + ":" + strconv.Itoa(ContainerGID),
+		Command:         cmd,
+		Env:             workEnv(p, sb),
 		WorkDir:         WorkspaceDir,
 		Init:            true,
 		CapDrop:         []string{"ALL"},
@@ -427,6 +423,19 @@ func WorkSpec(p db.Project, sb db.Sandbox, cmd []string) podman.ContainerSpec {
 			{Name: HomeVolume(p.ID), Dest: HomeDir},
 		},
 	}
+}
+
+// workEnv is the workspace container's environment (plan section 3.4).
+func workEnv(p db.Project, sb db.Sandbox) map[string]string {
+	env := map[string]string{
+		"WSM_PROJECT": p.Slug,
+		"WSM_SANDBOX": sb.Slug,
+		"HOME":        HomeDir,
+	}
+	if sb.Branch != "" {
+		env["WSM_BRANCH"] = sb.Branch
+	}
+	return env
 }
 
 // PodSpec returns the pod for a sandbox: pasta networking and a keep-id
@@ -571,7 +580,8 @@ func (m *Manager) removePodman(ctx context.Context, pc *podman.Client, sb db.San
 	return pc.VolumeRemove(ctx, CodeVolume(sb.ID))
 }
 
-// StartSandbox starts a sandbox's pod.
+// StartSandbox starts a sandbox's pod. The first start of a sandbox in a
+// project with a repository also seeds its code (ADR 0010).
 func (m *Manager) StartSandbox(ctx context.Context, projectSlug, slug string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -582,7 +592,22 @@ func (m *Manager) StartSandbox(ctx context.Context, projectSlug, slug string) er
 	pc := m.Podman(p.LinuxUID)
 	defer pc.Close()
 	err = m.job(ctx, "sandbox.start", sb.ID, func() error {
-		return pc.PodStart(ctx, sb.PodName)
+		if err := pc.PodStart(ctx, sb.PodName); err != nil {
+			return err
+		}
+		if !p.HasRepo() || sb.SeededAt != nil {
+			return nil
+		}
+		if err := m.seed(ctx, pc, p, sb); err != nil {
+			// Without its code the sandbox is of no use. It stops, and
+			// the next start tries again.
+			bg := context.WithoutCancel(ctx)
+			if serr := pc.PodStop(bg, sb.PodName, stopTimeout); serr != nil {
+				m.logf("stop sandbox %s/%s after a failed seed: %v", p.Slug, sb.Slug, serr)
+			}
+			return fmt.Errorf("start sandbox %s/%s: %w", p.Slug, sb.Slug, err)
+		}
+		return nil
 	})
 	status := db.StatusRunning
 	if err != nil {
