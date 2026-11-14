@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"strconv"
 	"sync"
@@ -102,6 +103,13 @@ type UserAdmin interface {
 	DeleteProjectUser(ctx context.Context, uid int) error
 }
 
+// Mirrors keeps the projects' git mirrors on the host (gitmgr.Mirrors).
+type Mirrors interface {
+	Update(ctx context.Context, r gitmgr.Repo) error
+	Bundle(ctx context.Context, projectID, branch string, w io.Writer) error
+	Remove(projectID string) error
+}
+
 // Manager runs project and sandbox operations. Operations that change
 // state run one at a time.
 type Manager struct {
@@ -112,6 +120,8 @@ type Manager struct {
 	// Secrets seals deploy keys at rest (ADR 0009). Projects with a
 	// repository need it.
 	Secrets *secret.Box
+	// Mirrors holds the git mirrors of projects with a repository.
+	Mirrors Mirrors
 	Logf    func(format string, args ...any)
 
 	mu sync.Mutex
@@ -330,6 +340,11 @@ func (m *Manager) DeleteProject(ctx context.Context, slug string) error {
 		}
 		if err := m.Users.DeleteProjectUser(ctx, p.LinuxUID); err != nil {
 			return fmt.Errorf("delete project %s: %w", p.Slug, err)
+		}
+		if p.HasRepo() && m.Mirrors != nil {
+			if err := m.Mirrors.Remove(p.ID); err != nil {
+				return fmt.Errorf("delete project %s: %w", p.Slug, err)
+			}
 		}
 		for _, sb := range sbs {
 			if err := m.Store.DeleteSandbox(ctx, sb.ID); err != nil {

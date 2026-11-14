@@ -10,6 +10,7 @@ import (
 
 	"github.com/JCombee/wsm/internal/api"
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/helper"
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/sandbox"
@@ -51,6 +52,11 @@ func runServe(e env) error {
 		return err
 	}
 
+	mirrors, err := gitmgr.NewMirrors(gitmgr.DefaultDir, gitmgr.DefaultHome, gitmgr.DefaultGit)
+	if err != nil {
+		return err
+	}
+
 	hc := &helper.Client{Socket: *helperSocket}
 	// Sandboxes must never run without the egress rules, so the manager
 	// does not start without them.
@@ -68,6 +74,7 @@ func runServe(e env) error {
 			return podman.NewClient(helper.PodmanSocket(uid))
 		},
 		Secrets: box,
+		Mirrors: mirrors,
 		Logf:    logger.Printf,
 	}
 	srv := &http.Server{
