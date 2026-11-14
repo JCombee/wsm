@@ -138,8 +138,10 @@ log "checking wsm and tools"
 		exit 1
 	}
 	file "$SRC_BIN" 2>/dev/null || true
-	ldd "$SRC_BIN" 2>&1 | grep -q 'not a dynamic executable' || {
-		echo "mcpspike is not static"
+	# ldd exits 1 for a static binary, so look only at its output.
+	lddout=$(ldd "$SRC_BIN" 2>&1)
+	[[ $lddout == *"not a dynamic executable"* ]] || {
+		echo "mcpspike is not static: $lddout"
 		exit 1
 	}
 	ip -4 addr show dev wsm0 | grep -q "inet $MCP_IP/" || exit 1
