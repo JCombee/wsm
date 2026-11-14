@@ -48,6 +48,10 @@ const (
 
 const wsmBin = "/usr/local/bin/wsm"
 
+// testSlugs are all projects the tests create; setup and teardown delete
+// them.
+var testSlugs = []string{"iso-a", "iso-b", "iso-c", "iso-d", "iso-e", "iso-f", "iso-g"}
+
 // project is a project created for the tests, with one running sandbox.
 type project struct {
 	slug, id, user string
@@ -199,7 +203,7 @@ func setup(ctx context.Context) (*suite, error) {
 	}
 
 	// Leftovers of an earlier run.
-	for _, slug := range []string{"iso-a", "iso-b", "iso-c"} {
+	for _, slug := range testSlugs {
 		wsm(ctx, "project", "delete", slug)
 	}
 
@@ -229,7 +233,7 @@ func teardown() {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
-	for _, slug := range []string{"iso-a", "iso-b", "iso-c"} {
+	for _, slug := range testSlugs {
 		wsm(ctx, "project", "delete", slug)
 	}
 	if s.tmp != "" {
@@ -238,8 +242,15 @@ func teardown() {
 }
 
 func createProject(ctx context.Context, st *suite, slug string) (project, error) {
-	_, err := wsm(ctx, "project", "create", "--slug", slug, "--image", testImage,
-		"--cpus", testCPUs, "--memory", strconv.Itoa(testMemory), "--pids", strconv.Itoa(testPids))
+	return createProjectFrom(ctx, st, slug, "--image", testImage)
+}
+
+// createProjectFrom creates a project with the test limits and the image
+// source in source: "--image REF" or "--containerfile PATH".
+func createProjectFrom(ctx context.Context, st *suite, slug string, source ...string) (project, error) {
+	args := append([]string{"project", "create", "--slug", slug}, source...)
+	args = append(args, "--cpus", testCPUs, "--memory", strconv.Itoa(testMemory), "--pids", strconv.Itoa(testPids))
+	_, err := wsm(ctx, args...)
 	if err != nil {
 		return project{}, err
 	}

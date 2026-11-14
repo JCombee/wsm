@@ -118,6 +118,8 @@ func TestOtherProjectFilesAndSocket(t *testing.T) {
 }
 
 type inspect struct {
+	// Image is the ID of the image the container runs.
+	Image string `json:"Image"`
 	State struct {
 		Pid int `json:"Pid"`
 	} `json:"State"`
@@ -154,8 +156,13 @@ func inspectWork(t *testing.T, p project) inspect {
 }
 
 func TestContainerHardening(t *testing.T) {
-	ctx := ctxT(t)
-	p := s.a
+	checkHardening(ctxT(t), t, s.a)
+}
+
+// checkHardening checks the workspace container of p against CLAUDE.md
+// invariant 9 and the test limits.
+func checkHardening(ctx context.Context, t *testing.T, p project) {
+	t.Helper()
 	// pid 1 is the init process; self is the exec itself.
 	for _, pid := range []string{"1", "self"} {
 		out, err := inSandbox(ctx, p, "cat", "/proc/"+pid+"/status")
