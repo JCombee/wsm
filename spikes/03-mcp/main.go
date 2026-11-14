@@ -36,6 +36,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	switch args[0] {
 	case "serve":
 		err = runServe(ctx, args[1:], stderr)
+	case "mockllm":
+		err = runMockLLM(ctx, args[1:], stderr)
 	default:
 		fmt.Fprintf(stderr, "mcpspike: unknown subcommand %q\n", args[0])
 		return 2
