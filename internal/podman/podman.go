@@ -63,7 +63,8 @@ func NewClientDialer(dial DialFunc) *Client {
 		IdleConnTimeout:    30 * time.Second,
 		// The project user runs the server, so a stalled answer must not
 		// hold the manager for long. Pod stop answers after its own stop
-		// timeout; nothing else is slow, since wsm pulls no images.
+		// timeout. Pulls and builds send their headers before they start
+		// and then stream; the caller's context bounds the whole stream.
 		ResponseHeaderTimeout: 2 * time.Minute,
 	}}
 	return c
