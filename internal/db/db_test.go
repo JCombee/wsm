@@ -2,11 +2,16 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"io/fs"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/pressly/goose/v3"
 
 	"github.com/JCombee/wsm/internal/projectuid"
 )
@@ -258,4 +263,132 @@ func TestTimeFormatSorts(t *testing.T) {
 	if err != nil || !got.Equal(time.Date(2026, 1, 1, 0, 0, 5, 100, time.UTC)) {
 		t.Errorf("round trip: %v, %v", got, err)
 	}
+}
+
+// migrateTo applies the embedded migrations up to and including version.
+func migrateTo(t *testing.T, sqlDB *sql.DB, version int64) {
+	t.Helper()
+	fsys, err := fs.Sub(migrations, "migrations")
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := goose.NewProvider(goose.DialectSQLite3, sqlDB, fsys, goose.WithDisableGlobalRegistry(true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.UpTo(context.Background(), version); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestProjectImageSource(t *testing.T) {
+	ctx := context.Background()
+	const cf = "FROM docker.io/library/debian:trixie-slim\nCMD [\"sleep\",\"infinity\"]\n"
+	tests := []struct {
+		name          string
+		source        string
+		imageRef      string
+		containerfile string
+		wantErr       bool
+		wantSource    string
+	}{
+		{"registry", ImageSourceRegistry, "docker.io/library/debian:trixie-slim", "", false, ImageSourceRegistry},
+		{"empty source means registry", "", "localhost/test:latest", "", false, ImageSourceRegistry},
+		{"containerfile", ImageSourceContainerfile, "", cf, false, ImageSourceContainerfile},
+		{"containerfile at the limit", ImageSourceContainerfile, "", "FROM x\n" + strings.Repeat("#", MaxContainerfile-7), false, ImageSourceContainerfile},
+		{"unknown source", "git", "img", "", true, ""},
+		{"registry without image", ImageSourceRegistry, "", "", true, ""},
+		{"registry with containerfile", ImageSourceRegistry, "img", cf, true, ""},
+		{"both sources", ImageSourceContainerfile, "img", cf, true, ""},
+		{"containerfile missing", ImageSourceContainerfile, "", "", true, ""},
+		{"containerfile blank", ImageSourceContainerfile, "", " \n\t", true, ""},
+		{"containerfile too large", ImageSourceContainerfile, "", "FROM x\n" + strings.Repeat("#", MaxContainerfile-6), true, ""},
+		{"containerfile with NUL", ImageSourceContainerfile, "", "FROM x\x00\n", true, ""},
+		{"containerfile not UTF-8", ImageSourceContainerfile, "", "FROM x\xff\n", true, ""},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := openTest(t)
+			p := newProject(fmt.Sprintf("p%d", i))
+			p.ImageSource, p.ImageRef, p.Containerfile = tt.source, tt.imageRef, tt.containerfile
+			err := s.CreateProject(ctx, p, userName)
+			if tt.wantErr {
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatalf("err = %v, want ErrInvalid", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := s.ProjectByID(ctx, p.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.ImageSource != tt.wantSource || got.ImageRef != tt.imageRef || got.Containerfile != tt.containerfile {
+				t.Errorf("stored source %q ref %q containerfile %d bytes", got.ImageSource, got.ImageRef, len(got.Containerfile))
+			}
+		})
+	}
+
+	// The CHECK constraints hold even for writes that bypass the store.
+	raw := []struct {
+		name          string
+		source        string
+		imageRef      string
+		containerfile any
+		ok            bool
+	}{
+		{"registry", ImageSourceRegistry, "img", nil, true},
+		{"containerfile", ImageSourceContainerfile, "", cf, true},
+		{"unknown source", "git", "img", nil, false},
+		{"registry with containerfile", ImageSourceRegistry, "img", cf, false},
+		{"registry without image", ImageSourceRegistry, "", nil, false},
+		{"containerfile with image", ImageSourceContainerfile, "img", cf, false},
+		{"containerfile missing", ImageSourceContainerfile, "", nil, false},
+		{"containerfile empty", ImageSourceContainerfile, "", "", false},
+		{"containerfile too large", ImageSourceContainerfile, "", strings.Repeat("#", MaxContainerfile+1), false},
+	}
+	s := openTest(t)
+	for i, tt := range raw {
+		t.Run("check/"+tt.name, func(t *testing.T) {
+			_, err := s.DB.Exec(`
+				INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_source, image_ref,
+					containerfile, cpu_limit, mem_limit, pids_limit, created_at)
+				VALUES (?, ?, 'n', ?, ?, ?, ?, ?, 1, 1, 1, '2026-01-01T00:00:00.000000000Z')`,
+				fmt.Sprint("id", i), fmt.Sprint("s", i), userName(projectuid.Min+i), projectuid.Min+i,
+				tt.source, tt.imageRef, tt.containerfile)
+			if (err == nil) != tt.ok {
+				t.Fatalf("insert: err = %v, want ok = %v", err, tt.ok)
+			}
+		})
+	}
+
+	// Projects from before migration 00003 become registry projects.
+	t.Run("existing projects", func(t *testing.T) {
+		sqlDB, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "old.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer sqlDB.Close()
+		migrateTo(t, sqlDB, 2)
+		_, err = sqlDB.Exec(`
+			INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_ref,
+				cpu_limit, mem_limit, pids_limit, created_at)
+			VALUES ('old', 'old', 'n', 'wsm-p-50000', 50000, 'localhost/test:latest', 1, 1, 1,
+				'2026-01-01T00:00:00.000000000Z')`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := Migrate(ctx, sqlDB); err != nil {
+			t.Fatal(err)
+		}
+		got, err := NewStore(sqlDB).ProjectBySlug(ctx, "old")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.ImageSource != ImageSourceRegistry || got.ImageRef != "localhost/test:latest" || got.Containerfile != "" {
+			t.Errorf("migrated project: %+v", got)
+		}
+	})
 }

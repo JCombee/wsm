@@ -5,13 +5,28 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	"modernc.org/sqlite"
 	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/JCombee/wsm/internal/projectuid"
 )
+
+// Image sources of a project.
+const (
+	// ImageSourceRegistry: the image is ImageRef, pulled from a public
+	// registry.
+	ImageSourceRegistry = "registry"
+	// ImageSourceContainerfile: the image is built from Containerfile.
+	ImageSourceContainerfile = "containerfile"
+)
+
+// MaxContainerfile is the largest Containerfile a project can have, in
+// bytes. The CHECK constraint in migration 00003 uses the same number.
+const MaxContainerfile = 256 << 10
 
 // Project is one row of the projects table.
 type Project struct {
@@ -20,11 +35,51 @@ type Project struct {
 	Name      string
 	LinuxUser string
 	LinuxUID  int
-	ImageRef  string
-	CPUMillis int64 // CPU limit per sandbox in millicores
-	MemBytes  int64 // memory limit per sandbox in bytes
-	PidsLimit int64 // process limit per sandbox
-	CreatedAt time.Time
+	// ImageSource is ImageSourceRegistry or ImageSourceContainerfile.
+	ImageSource string
+	// ImageRef is the registry image; empty for a Containerfile project.
+	ImageRef string
+	// Containerfile is the build recipe; empty for a registry project. It
+	// lives only in this database (CLAUDE.md invariant 5).
+	Containerfile string
+	CPUMillis     int64 // CPU limit per sandbox in millicores
+	MemBytes      int64 // memory limit per sandbox in bytes
+	PidsLimit     int64 // process limit per sandbox
+	CreatedAt     time.Time
+}
+
+// ValidContainerfile checks a Containerfile: not empty, at most
+// MaxContainerfile bytes, valid UTF-8 and without NUL bytes.
+func ValidContainerfile(s string) error {
+	switch {
+	case strings.TrimSpace(s) == "":
+		return fmt.Errorf("%w: containerfile is empty", ErrInvalid)
+	case len(s) > MaxContainerfile:
+		return fmt.Errorf("%w: containerfile is larger than %d bytes", ErrInvalid, MaxContainerfile)
+	case !utf8.ValidString(s):
+		return fmt.Errorf("%w: containerfile is not valid UTF-8", ErrInvalid)
+	case strings.ContainsRune(s, 0):
+		return fmt.Errorf("%w: containerfile contains a NUL byte", ErrInvalid)
+	}
+	return nil
+}
+
+// checkImageSource checks that a project has exactly one image source.
+func checkImageSource(p *Project) error {
+	switch p.ImageSource {
+	case ImageSourceRegistry:
+		if p.ImageRef == "" || p.Containerfile != "" {
+			return fmt.Errorf("%w: a registry project needs an image and no containerfile", ErrInvalid)
+		}
+		return nil
+	case ImageSourceContainerfile:
+		if p.ImageRef != "" {
+			return fmt.Errorf("%w: a containerfile project has no image reference", ErrInvalid)
+		}
+		return ValidContainerfile(p.Containerfile)
+	default:
+		return fmt.Errorf("%w: image source %q", ErrInvalid, p.ImageSource)
+	}
 }
 
 // Sandbox statuses.
@@ -73,6 +128,12 @@ func mapErr(err error) error {
 // userName derives the Linux user name from that UID; p.ID, p.LinuxUID,
 // p.LinuxUser and p.CreatedAt are filled in.
 func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid int) string) error {
+	if p.ImageSource == "" {
+		p.ImageSource = ImageSourceRegistry
+	}
+	if err := checkImageSource(p); err != nil {
+		return fmt.Errorf("create project %q: %w", p.Slug, err)
+	}
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("create project: %w", err)
@@ -101,11 +162,12 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 	p.LinuxUser = userName(p.LinuxUID)
 	p.CreatedAt = s.Now().UTC()
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_ref,
-			cpu_limit, mem_limit, pids_limit, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		p.ID, p.Slug, p.Name, p.LinuxUser, p.LinuxUID, p.ImageRef,
-		p.CPUMillis, p.MemBytes, p.PidsLimit, formatTime(p.CreatedAt))
+		INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_source,
+			image_ref, containerfile, cpu_limit, mem_limit, pids_limit, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.ID, p.Slug, p.Name, p.LinuxUser, p.LinuxUID, p.ImageSource,
+		p.ImageRef, nullString(p.Containerfile), p.CPUMillis, p.MemBytes, p.PidsLimit,
+		formatTime(p.CreatedAt))
 	if err != nil {
 		return fmt.Errorf("create project %q: %w", p.Slug, mapErr(err))
 	}
@@ -115,16 +177,20 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 	return nil
 }
 
-const projectColumns = `id, slug, name, linux_user, linux_uid, image_ref,
-	cpu_limit, mem_limit, pids_limit, created_at`
+func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
+
+const projectColumns = `id, slug, name, linux_user, linux_uid, image_source, image_ref,
+	containerfile, cpu_limit, mem_limit, pids_limit, created_at`
 
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var created string
-	if err := row.Scan(&p.ID, &p.Slug, &p.Name, &p.LinuxUser, &p.LinuxUID, &p.ImageRef,
-		&p.CPUMillis, &p.MemBytes, &p.PidsLimit, &created); err != nil {
+	var containerfile sql.NullString
+	if err := row.Scan(&p.ID, &p.Slug, &p.Name, &p.LinuxUser, &p.LinuxUID, &p.ImageSource,
+		&p.ImageRef, &containerfile, &p.CPUMillis, &p.MemBytes, &p.PidsLimit, &created); err != nil {
 		return p, mapErr(err)
 	}
+	p.Containerfile = containerfile.String
 	t, err := parseTime(created)
 	if err != nil {
 		return p, err

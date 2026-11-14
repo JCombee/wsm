@@ -186,6 +186,11 @@ func TestProjectSpecValidation(t *testing.T) {
 		{"memory too high", ProjectSpec{Slug: "app", ImageRef: "img", MemBytes: 1 << 50}},
 		{"pids negative", ProjectSpec{Slug: "app", ImageRef: "img", PidsLimit: -1}},
 		{"control character in name", ProjectSpec{Slug: "app", Name: "a\x1b[2J", ImageRef: "img"}},
+		{"image and containerfile", ProjectSpec{Slug: "app", ImageRef: "img", Containerfile: "FROM img\n"}},
+		{"blank containerfile", ProjectSpec{Slug: "app", Containerfile: "\n"}},
+		{"containerfile with NUL", ProjectSpec{Slug: "app", Containerfile: "FROM img\x00\n"}},
+		{"containerfile not UTF-8", ProjectSpec{Slug: "app", Containerfile: "FROM img\xfe\n"}},
+		{"containerfile too large", ProjectSpec{Slug: "app", Containerfile: strings.Repeat("#", db.MaxContainerfile+1)}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -24,6 +24,9 @@ var migrations embed.FS
 // ErrNotFound is returned when a row does not exist.
 var ErrNotFound = errors.New("not found")
 
+// ErrInvalid is returned for values the database must not store.
+var ErrInvalid = errors.New("invalid")
+
 // ErrConflict is returned when a row violates a uniqueness rule.
 var ErrConflict = errors.New("already exists")
 

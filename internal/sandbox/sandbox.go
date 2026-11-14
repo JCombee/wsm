@@ -57,8 +57,9 @@ var (
 	imagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/:@-]{0,254}$`)
 )
 
-// ErrInvalid marks invalid input from the API.
-var ErrInvalid = errors.New("invalid")
+// ErrInvalid marks invalid input from the API. It is db.ErrInvalid, so
+// the store's own checks map to the same error.
+var ErrInvalid = db.ErrInvalid
 
 // ErrState marks an operation that the sandbox's state does not allow.
 var ErrState = errors.New("not allowed in this state")
@@ -99,14 +100,16 @@ func (m *Manager) logf(format string, args ...any) {
 	}
 }
 
-// ProjectSpec is the input for a new project.
+// ProjectSpec is the input for a new project. It has exactly one image
+// source: a registry image in ImageRef, or a Containerfile.
 type ProjectSpec struct {
-	Slug      string
-	Name      string
-	ImageRef  string
-	CPUMillis int64
-	MemBytes  int64
-	PidsLimit int64
+	Slug          string
+	Name          string
+	ImageRef      string
+	Containerfile string
+	CPUMillis     int64
+	MemBytes      int64
+	PidsLimit     int64
 }
 
 // ValidSlug reports whether s is a valid project or sandbox slug.
@@ -130,7 +133,11 @@ func (s *ProjectSpec) validate() error {
 		return fmt.Errorf("%w: slug %q: use 1-32 lowercase letters, digits and dashes, starting with a letter", ErrInvalid, s.Slug)
 	case len(s.Name) > 100:
 		return fmt.Errorf("%w: name is longer than 100 bytes", ErrInvalid)
-	case !imagePattern.MatchString(s.ImageRef):
+	case s.ImageRef != "" && s.Containerfile != "":
+		return fmt.Errorf("%w: give an image or a containerfile, not both", ErrInvalid)
+	case s.ImageRef == "" && s.Containerfile == "":
+		return fmt.Errorf("%w: give an image or a containerfile", ErrInvalid)
+	case s.Containerfile == "" && !imagePattern.MatchString(s.ImageRef):
 		return fmt.Errorf("%w: image %q", ErrInvalid, s.ImageRef)
 	case s.CPUMillis < MinCPUMillis || s.CPUMillis > MaxCPUMillis:
 		return fmt.Errorf("%w: cpu %d millicores is outside %d-%d", ErrInvalid, s.CPUMillis, MinCPUMillis, MaxCPUMillis)
@@ -144,7 +151,18 @@ func (s *ProjectSpec) validate() error {
 			return fmt.Errorf("%w: name contains control characters", ErrInvalid)
 		}
 	}
+	if s.Containerfile != "" {
+		return db.ValidContainerfile(s.Containerfile)
+	}
 	return nil
+}
+
+// imageSource returns the database's image source for the spec.
+func (s *ProjectSpec) imageSource() string {
+	if s.Containerfile != "" {
+		return db.ImageSourceContainerfile
+	}
+	return db.ImageSourceRegistry
 }
 
 // job records an operation in the jobs table.
@@ -172,7 +190,8 @@ func (m *Manager) CreateProject(ctx context.Context, spec ProjectSpec, userName 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p := db.Project{
-		Slug: spec.Slug, Name: spec.Name, ImageRef: spec.ImageRef,
+		Slug: spec.Slug, Name: spec.Name, ImageSource: spec.imageSource(),
+		ImageRef: spec.ImageRef, Containerfile: spec.Containerfile,
 		CPUMillis: spec.CPUMillis, MemBytes: spec.MemBytes, PidsLimit: spec.PidsLimit,
 	}
 	if err := m.Store.CreateProject(ctx, &p, userName); err != nil {
