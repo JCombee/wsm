@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/helper"
+	"github.com/JCombee/wsm/internal/secret"
 )
 
 // M2a: project images are built from a Containerfile or pulled from a
@@ -253,8 +255,20 @@ func TestManagerStateNotReachable(t *testing.T) {
 	if _, err := os.ReadFile(db); err != nil {
 		t.Fatalf("control: %v", err)
 	}
+	// M2b: the mirrors and the key that seals deploy keys.
+	if _, err := os.ReadDir(gitmgr.DefaultDir); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	if _, err := os.ReadFile(secret.DefaultKeyFile); err != nil {
+		t.Fatalf("control: %v", err)
+	}
+	if fi, err := os.Stat(secret.DefaultKeyFile); err != nil || fi.Mode().Perm() != 0o600 {
+		t.Errorf("%s: mode %v, %v; want 0600", secret.DefaultKeyFile, fi.Mode(), err)
+	}
+	specs := []string{"readdir:" + dir, "readfile:" + db, "readdir:" + gitmgr.DefaultDir,
+		"readfile:" + secret.DefaultKeyFile}
 	for _, p := range []project{s.a, s.b} {
-		for _, spec := range []string{"readdir:" + dir, "readfile:" + db} {
+		for _, spec := range specs {
 			if ok, out := probeAs(ctx, p.user, spec); ok {
 				t.Errorf("%s: %s", p.user, out)
 			}
