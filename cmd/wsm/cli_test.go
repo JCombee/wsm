@@ -3,7 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/JCombee/wsm/internal/db"
 )
 
 func TestParseCPUs(t *testing.T) {
@@ -77,6 +82,9 @@ func TestCLIUsageErrors(t *testing.T) {
 		{"project"},
 		{"project", "create", "--slug", "app"},
 		{"project", "create", "--slug", "app", "--image", "img", "--memory", "lots"},
+		{"project", "create", "--slug", "app", "--image", "img", "--containerfile", "Containerfile"},
+		{"project", "image"},
+		{"project", "image", "a", "b"},
 		{"project", "delete"},
 		{"sandbox", "start", "app"},
 		{"sandbox", "reboot", "app/main"},
@@ -87,5 +95,41 @@ func TestCLIUsageErrors(t *testing.T) {
 		if code := run(context.Background(), args, nil, &out, &errOut); code != 2 {
 			t.Errorf("%q: exit code %d, want 2 (stderr %q)", args, code, errOut.String())
 		}
+	}
+}
+
+func TestReadContainerfile(t *testing.T) {
+	dir := t.TempDir()
+	write := func(name, content string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	tests := []struct {
+		name    string
+		path    string
+		want    string
+		wantErr string
+	}{
+		{"ok", write("ok", "FROM x\n"), "FROM x\n", ""},
+		{"at the limit", write("max", strings.Repeat("#", db.MaxContainerfile)), strings.Repeat("#", db.MaxContainerfile), ""},
+		{"too large", write("big", strings.Repeat("#", db.MaxContainerfile+1)), "", "larger than"},
+		{"missing", filepath.Join(dir, "missing"), "", "no such file"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := readContainerfile(tt.path)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil || got != tt.want {
+				t.Fatalf("readContainerfile = %d bytes, %v", len(got), err)
+			}
+		})
 	}
 }

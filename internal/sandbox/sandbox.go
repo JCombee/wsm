@@ -5,6 +5,8 @@ package sandbox
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"regexp"
@@ -34,6 +36,10 @@ const cpuPeriod = 100000
 
 // stopTimeout is how long a stopping container gets before it is killed.
 const stopTimeout = 10 * time.Second
+
+// imageTimeout bounds one image pull or build. The project user's Podman
+// runs it, so it must not hold the manager forever.
+const imageTimeout = 30 * time.Minute
 
 // Limits for project settings.
 const (
@@ -75,6 +81,18 @@ func CodeVolume(sandboxID string) string { return "sbx-" + sandboxID + "-code" }
 
 // HomeVolume returns the name of a project's shared /home/agent volume.
 func HomeVolume(projectID string) string { return "proj-" + projectID + "-home" }
+
+// ProjectImage returns the image a project's sandboxes run. For a registry
+// project that is its image reference. For a Containerfile project it is
+// localhost/wsm-<project id>:<first 12 hex characters of the SHA-256 of the
+// Containerfile>, so a changed Containerfile gets a new tag (ADR 0008).
+func ProjectImage(p db.Project) string {
+	if p.ImageSource != db.ImageSourceContainerfile {
+		return p.ImageRef
+	}
+	sum := sha256.Sum256([]byte(p.Containerfile))
+	return "localhost/wsm-" + p.ID + ":" + hex.EncodeToString(sum[:])[:12]
+}
 
 // UserAdmin creates and removes project users; wsm-helper does the work.
 type UserAdmin interface {
@@ -300,7 +318,7 @@ func workCommand(cfg podman.ImageConfig) []string {
 func WorkSpec(p db.Project, sb db.Sandbox, cmd []string) podman.ContainerSpec {
 	return podman.ContainerSpec{
 		Name:    WorkContainer(sb.ID),
-		Image:   p.ImageRef,
+		Image:   ProjectImage(p),
 		Pod:     PodName(sb.ID),
 		Labels:  labels(p, sb),
 		User:    strconv.Itoa(ContainerUID) + ":" + strconv.Itoa(ContainerGID),
@@ -379,16 +397,10 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 }
 
 func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Project, sb db.Sandbox) error {
-	// wsm neither pulls nor builds images yet; both come with M2 (plan
-	// section 5). Until then the image must already exist for the user.
-	ok, err := pc.ImageExists(ctx, p.ImageRef)
-	if err != nil {
+	if err := m.ensureImage(ctx, pc, p); err != nil {
 		return err
 	}
-	if !ok {
-		return fmt.Errorf("image %s is not present for user %s: %w", p.ImageRef, p.LinuxUser, ErrState)
-	}
-	cfg, err := pc.ImageInspect(ctx, p.ImageRef)
+	cfg, err := pc.ImageInspect(ctx, ProjectImage(p))
 	if err != nil {
 		return err
 	}
@@ -405,6 +417,61 @@ func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Proj
 		return err
 	}
 	return nil
+}
+
+// ensureImage makes sure the project's image is present for the project
+// user: a missing registry image is pulled, a missing Containerfile image
+// is built. A present image is used as it is.
+func (m *Manager) ensureImage(ctx context.Context, pc *podman.Client, p db.Project) error {
+	ref := ProjectImage(p)
+	ok, err := pc.ImageExists(ctx, ref)
+	if err != nil || ok {
+		return err
+	}
+	m.logf("project %s: image %s is missing, getting it", p.Slug, ref)
+	_, err = m.getImage(ctx, pc, p, podman.PullMissing)
+	return err
+}
+
+// getImage pulls (with policy) or builds the project's image as the
+// project user and returns its ID.
+func (m *Manager) getImage(ctx context.Context, pc *podman.Client, p db.Project, policy string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, imageTimeout)
+	defer cancel()
+	ref := ProjectImage(p)
+	if p.ImageSource == db.ImageSourceContainerfile {
+		return pc.ImageBuild(ctx, ref, p.Containerfile)
+	}
+	if err := pc.ImagePull(ctx, ref, policy); err != nil {
+		return "", err
+	}
+	return pc.ImageID(ctx, ref)
+}
+
+// RefreshImage builds a Containerfile project's image, or pulls a registry
+// project's image again, now. It returns the image reference and ID.
+// Existing sandboxes keep the image they were created with; new sandboxes
+// get the new one.
+func (m *Manager) RefreshImage(ctx context.Context, projectSlug string) (ref, id string, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, err := m.Store.ProjectBySlug(ctx, projectSlug)
+	if err != nil {
+		return "", "", err
+	}
+	pc := m.Podman(p.LinuxUID)
+	defer pc.Close()
+	ref = ProjectImage(p)
+	err = m.job(ctx, "project.image", p.ID, func() error {
+		var err error
+		id, err = m.getImage(ctx, pc, p, podman.PullAlways)
+		return err
+	})
+	if err != nil {
+		return ref, "", fmt.Errorf("image of project %s: %w", p.Slug, err)
+	}
+	m.logf("project %s: image %s is %s", p.Slug, ref, id)
+	return ref, id, nil
 }
 
 // removePodman removes a sandbox's pod and code volume. Missing objects are

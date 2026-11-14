@@ -22,6 +22,8 @@ type nopUsers struct{}
 func (nopUsers) CreateProjectUser(context.Context, int) error { return nil }
 func (nopUsers) DeleteProjectUser(context.Context, int) error { return nil }
 
+const testImageID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
 // okLibpod answers every libpod call with a plausible success.
 func okLibpod(w http.ResponseWriter, r *http.Request) {
 	p := r.URL.Path
@@ -29,7 +31,10 @@ func okLibpod(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(p, "/exists"):
 		w.WriteHeader(http.StatusNoContent)
 	case strings.Contains(p, "/images/") && strings.HasSuffix(p, "/json"):
-		io.WriteString(w, `{"Config":{"Cmd":["bash"]}}`)
+		io.WriteString(w, `{"Id":"`+testImageID+`","Config":{"Cmd":["bash"]}}`)
+	case strings.HasSuffix(p, "/images/pull"), strings.HasSuffix(p, "/build"):
+		io.Copy(io.Discard, r.Body)
+		io.WriteString(w, `{"stream":"done\n"}`)
 	case strings.HasSuffix(p, "/start"), strings.HasSuffix(p, "/stop"):
 		io.WriteString(w, `{"Errs":[],"Id":"x"}`)
 	case r.Method == http.MethodDelete && strings.Contains(p, "/pods/"):
@@ -115,6 +120,37 @@ func TestProjectAndSandboxRoutes(t *testing.T) {
 	}
 }
 
+func TestProjectImageRoutes(t *testing.T) {
+	ctx := context.Background()
+	c, _ := newTestAPI(t)
+	// The largest Containerfile, full of characters JSON escapes, fits.
+	cf := "FROM docker.io/library/debian:trixie-slim\n#" + strings.Repeat("\x01", db.MaxContainerfile-44) + "\n"
+	p, err := c.CreateProject(ctx, CreateProjectRequest{Slug: "built", Containerfile: cf})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.ImageSource != db.ImageSourceContainerfile || !strings.HasPrefix(p.Image, "localhost/wsm-"+p.ID+":") {
+		t.Errorf("project %+v", p)
+	}
+	if _, err := c.CreateProject(ctx, CreateProjectRequest{Slug: "pulled", Image: "docker.io/library/debian:trixie-slim"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, slug := range []string{"built", "pulled"} {
+		img, err := c.ProjectImage(ctx, slug)
+		if err != nil || img.ID != testImageID || img.Image == "" {
+			t.Errorf("ProjectImage(%s) = %+v, %v", slug, img, err)
+		}
+	}
+	if _, err := c.ProjectImage(ctx, "none"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Errorf("image of missing project: %v", err)
+	}
+	ps, err := c.Projects(ctx)
+	if err != nil || len(ps) != 2 || ps[0].ImageSource != "containerfile" || ps[1].ImageSource != "registry" ||
+		ps[1].Image != "docker.io/library/debian:trixie-slim" {
+		t.Errorf("Projects = %+v, %v", ps, err)
+	}
+}
+
 func TestRejectsInvalidBodies(t *testing.T) {
 	_, url := newTestAPI(t)
 	tests := []struct {
@@ -124,7 +160,10 @@ func TestRejectsInvalidBodies(t *testing.T) {
 		{"unknown field", "/v1/projects", `{"slug":"app","image":"img","privileged":true}`, 400},
 		{"wrong type", "/v1/projects", `{"slug":"app","image":"img","cpu_millis":"lots"}`, 400},
 		{"two objects", "/v1/projects", `{"slug":"app","image":"img"}{}`, 400},
-		{"too large", "/v1/projects", `{"slug":"app","name":"` + strings.Repeat("a", maxRequestBody) + `"}`, 400},
+		{"too large", "/v1/projects", `{"slug":"app","name":"` + strings.Repeat("a", maxProjectBody) + `"}`, 400},
+		{"sandbox body too large", "/v1/projects/app/sandboxes", `{"slug":"` + strings.Repeat("a", maxRequestBody) + `"}`, 400},
+		{"image and containerfile", "/v1/projects", `{"slug":"app","image":"img","containerfile":"FROM img\n"}`, 400},
+		{"containerfile with NUL", "/v1/projects", `{"slug":"app","containerfile":"FROM img\u0000\n"}`, 400},
 		{"bad slug", "/v1/projects", `{"slug":"../etc","image":"img"}`, 400},
 		{"sandbox in missing project", "/v1/projects/none/sandboxes", `{"slug":"main"}`, 404},
 	}

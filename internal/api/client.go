@@ -105,6 +105,13 @@ func (c *Client) CreateProject(ctx context.Context, req CreateProjectRequest) (P
 	return out, err
 }
 
+// ProjectImage builds or pulls a project's image now.
+func (c *Client) ProjectImage(ctx context.Context, project string) (ProjectImage, error) {
+	var out ProjectImage
+	err := c.do(ctx, http.MethodPost, "/v1/projects/"+url.PathEscape(project)+"/image", nil, &out)
+	return out, err
+}
+
 // DeleteProject deletes a project with all its sandboxes.
 func (c *Client) DeleteProject(ctx context.Context, project string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/projects/"+url.PathEscape(project), nil, nil)

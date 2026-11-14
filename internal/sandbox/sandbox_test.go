@@ -1,7 +1,11 @@
 package sandbox
 
 import (
+	"archive/tar"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,15 +45,21 @@ func (f *fakeUsers) DeleteProjectUser(_ context.Context, uid int) error {
 	return nil
 }
 
-// fakeLibpod is a minimal stateful libpod API. It has no pull endpoint:
-// wsm must never pull.
+// fakeLibpod is a minimal stateful libpod API.
 type fakeLibpod struct {
-	mu              sync.Mutex
-	requests        []string
-	bodies          map[string]map[string]any
-	pods            map[string]bool
-	volumes         map[string]bool
-	hasImage        bool
+	mu       sync.Mutex
+	requests []string
+	bodies   map[string]map[string]any
+	pods     map[string]bool
+	volumes  map[string]bool
+	// anyImage makes every image exist; otherwise only those in images.
+	anyImage bool
+	images   map[string]bool
+	// builds holds the Containerfile of every build, by tag.
+	builds          map[string][]string
+	pulls           []string
+	failPull        bool
+	failBuild       bool
 	imageCmd        []string
 	imageEntrypoint []string
 	failCreate      bool
@@ -58,8 +68,41 @@ type fakeLibpod struct {
 func newFakeLibpod() *fakeLibpod {
 	return &fakeLibpod{
 		bodies: map[string]map[string]any{}, pods: map[string]bool{}, volumes: map[string]bool{},
-		hasImage: true,
+		anyImage: true, images: map[string]bool{}, builds: map[string][]string{},
 	}
+}
+
+// fakeImageID is the ID of every image in the fake.
+const fakeImageID = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+// readContainerfile returns the Containerfile from a build context, and
+// fails if the context holds anything else.
+func readContainerfile(data []byte) (string, error) {
+	tr := tar.NewReader(bytes.NewReader(data))
+	var cf string
+	n := 0
+	for {
+		h, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		n++
+		if h.Name != "Containerfile" || n > 1 {
+			return "", fmt.Errorf("unexpected file %q in the build context", h.Name)
+		}
+		b, err := io.ReadAll(tr)
+		if err != nil {
+			return "", err
+		}
+		cf = string(b)
+	}
+	if n != 1 {
+		return "", errors.New("no Containerfile in the build context")
+	}
+	return cf, nil
 }
 
 func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -68,9 +111,10 @@ func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/v5.0.0/libpod")
 	f.requests = append(f.requests, r.Method+" "+path)
 	var body map[string]any
+	var data []byte
 	if r.Body != nil {
-		data, _ := io.ReadAll(r.Body)
-		if len(data) > 0 {
+		data, _ = io.ReadAll(r.Body)
+		if len(data) > 0 && r.Header.Get("Content-Type") == "application/json" {
 			json.Unmarshal(data, &body)
 		}
 	}
@@ -85,15 +129,44 @@ func (f *fakeLibpod) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	switch {
 	case len(parts) == 3 && parts[0] == "images" && parts[2] == "exists":
-		if !f.hasImage {
+		if !f.anyImage && !f.images[parts[1]] {
 			notFound()
 		} else {
 			w.WriteHeader(http.StatusNoContent)
 		}
 	case len(parts) == 3 && parts[0] == "images" && parts[2] == "json":
+		if !f.anyImage && !f.images[parts[1]] {
+			notFound()
+			return
+		}
 		cmd, _ := json.Marshal(f.imageCmd)
 		ep, _ := json.Marshal(f.imageEntrypoint)
-		fmt.Fprintf(w, `{"Id":"img","Config":{"Cmd":%s,"Entrypoint":%s}}`, cmd, ep)
+		fmt.Fprintf(w, `{"Id":"sha256:%s","Config":{"Cmd":%s,"Entrypoint":%s}}`, fakeImageID, cmd, ep)
+	case path == "/images/pull" && r.Method == http.MethodPost:
+		ref := r.URL.Query().Get("reference")
+		f.pulls = append(f.pulls, ref+" "+r.URL.Query().Get("policy"))
+		if f.failPull {
+			io.WriteString(w, `{"stream":"Trying to pull"}`+"\n"+`{"error":"manifest unknown"}`)
+			return
+		}
+		f.images[ref] = true
+		fmt.Fprintf(w, `{"stream":"Trying to pull"}`+"\n"+`{"id":%q,"images":[%q]}`, fakeImageID, fakeImageID)
+	case path == "/build" && r.Method == http.MethodPost:
+		q := r.URL.Query()
+		cf, err := readContainerfile(data)
+		if err != nil || q.Get("dockerfile") != "Containerfile" || q.Get("rm") != "true" {
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"message":"fake libpod: bad build: %v %v"}`, err, q)
+			return
+		}
+		tag := q.Get("t")
+		f.builds[tag] = append(f.builds[tag], cf)
+		if f.failBuild {
+			io.WriteString(w, `{"stream":"STEP 1/2: FROM x\n"}`+"\n"+`{"error":"building at STEP \"RUN false\": exit status 1"}`)
+			return
+		}
+		f.images[tag] = true
+		fmt.Fprintf(w, `{"stream":"STEP 1/2: FROM x\n"}`+"\n"+`{"stream":"%s\n"}`, fakeImageID)
 	case path == "/volumes/create":
 		f.bodies["volume "+body["Name"].(string)] = body
 		f.volumes[body["Name"].(string)] = true
@@ -351,27 +424,195 @@ func TestImageCommandIsKept(t *testing.T) {
 	}
 }
 
-func TestCreateSandboxNeedsLocalImage(t *testing.T) {
+// TestCreateSandboxImageUnavailable checks that a registry image that
+// cannot be pulled fails the sandbox and leaves nothing behind. M1 failed
+// here with "image ... is not present"; since M2a wsm pulls the image.
+func TestCreateSandboxImageUnavailable(t *testing.T) {
 	ctx := context.Background()
 	m, _, lp := newManager(t)
-	lp.hasImage = false
+	lp.anyImage, lp.failPull = false, true
 	if _, err := m.CreateProject(ctx, ProjectSpec{Slug: "app", ImageRef: "docker.io/library/x:1"}, userName); err != nil {
 		t.Fatal(err)
 	}
 	_, err := m.CreateSandbox(ctx, "app", "main")
-	if !errors.Is(err, ErrState) || !strings.Contains(err.Error(), "docker.io/library/x:1 is not present") {
-		t.Fatalf("err = %v, want ErrState for the missing image", err)
+	if err == nil || !strings.Contains(err.Error(), "pull docker.io/library/x:1: manifest unknown") {
+		t.Fatalf("err = %v, want the pull error", err)
 	}
-	for _, r := range lp.requests {
-		if strings.Contains(r, "/pull") {
-			t.Errorf("wsm tried to pull: %s", r)
-		}
+	if len(lp.builds) != 0 {
+		t.Errorf("a registry project was built: %v", lp.builds)
 	}
 	if len(lp.pods) != 0 || len(lp.volumes) != 0 {
 		t.Errorf("left: pods %v volumes %v", lp.pods, lp.volumes)
 	}
 	if sbs, _ := m.Sandboxes(ctx, "app"); len(sbs) != 0 {
 		t.Errorf("sandbox rows left: %+v", sbs)
+	}
+}
+
+func TestProjectImage(t *testing.T) {
+	cf := "FROM docker.io/library/debian:trixie-slim\n"
+	sum := sha256.Sum256([]byte(cf))
+	tests := []struct {
+		name string
+		p    db.Project
+		want string
+	}{
+		{"registry", db.Project{ID: "abcdefghijkl", ImageSource: db.ImageSourceRegistry, ImageRef: "docker.io/library/debian:trixie-slim"},
+			"docker.io/library/debian:trixie-slim"},
+		{"containerfile", db.Project{ID: "abcdefghijkl", ImageSource: db.ImageSourceContainerfile, Containerfile: cf},
+			"localhost/wsm-abcdefghijkl:" + hex.EncodeToString(sum[:])[:12]},
+		{"changed containerfile", db.Project{ID: "abcdefghijkl", ImageSource: db.ImageSourceContainerfile, Containerfile: cf + "RUN true\n"},
+			"localhost/wsm-abcdefghijkl:" + func() string { s := sha256.Sum256([]byte(cf + "RUN true\n")); return hex.EncodeToString(s[:])[:12] }()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ProjectImage(tt.p)
+			if got != tt.want {
+				t.Errorf("ProjectImage = %q, want %q", got, tt.want)
+			}
+			if !imagePattern.MatchString(got) {
+				t.Errorf("%q does not match the image pattern", got)
+			}
+		})
+	}
+}
+
+func TestSandboxEnsuresImage(t *testing.T) {
+	const (
+		registryRef = "docker.io/library/debian:trixie-slim"
+		cf          = "FROM docker.io/library/debian:trixie-slim\nCMD [\"sleep\",\"infinity\"]\n"
+	)
+	tests := []struct {
+		name          string
+		containerfile bool
+		present       bool
+		failPull      bool
+		failBuild     bool
+		wantPulls     int
+		wantBuilds    int
+		wantErr       string
+	}{
+		{"registry image present: no pull", false, true, false, false, 0, 0, ""},
+		{"registry image missing: pull", false, false, false, false, 1, 0, ""},
+		{"build tag present: no build", true, true, false, false, 0, 0, ""},
+		{"build tag missing: build", true, false, false, false, 0, 1, ""},
+		{"pull fails: rollback", false, false, true, false, 1, 0, "manifest unknown"},
+		{"build fails: rollback", true, false, false, true, 0, 1, "exit status 1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _, lp := newManager(t)
+			lp.anyImage, lp.failPull, lp.failBuild = false, tt.failPull, tt.failBuild
+			spec := ProjectSpec{Slug: "app", ImageRef: registryRef}
+			if tt.containerfile {
+				spec = ProjectSpec{Slug: "app", Containerfile: cf}
+			}
+			p, err := m.CreateProject(ctx, spec, userName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ref := ProjectImage(p)
+			if tt.present {
+				lp.images[ref] = true
+			}
+			if len(lp.pulls) != 0 || len(lp.builds) != 0 {
+				t.Fatalf("project create got an image: pulls %v builds %v", lp.pulls, lp.builds)
+			}
+
+			sb, err := m.CreateSandbox(ctx, "app", "main")
+
+			if len(lp.pulls) != tt.wantPulls {
+				t.Errorf("pulls = %v, want %d", lp.pulls, tt.wantPulls)
+			}
+			for _, pull := range lp.pulls {
+				if pull != registryRef+" missing" {
+					t.Errorf("pull = %q, want %q with policy missing", pull, registryRef)
+				}
+			}
+			if n := len(lp.builds[ref]); n != tt.wantBuilds || len(lp.builds) > 1 {
+				t.Errorf("builds = %v, want %d of %s", lp.builds, tt.wantBuilds, ref)
+			}
+			for _, got := range lp.builds[ref] {
+				if got != cf {
+					t.Errorf("built %q, want the stored Containerfile", got)
+				}
+			}
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("err = %v, want %q", err, tt.wantErr)
+				}
+				if len(lp.pods) != 0 {
+					t.Errorf("pods left: %v", lp.pods)
+				}
+				for v := range lp.volumes {
+					if strings.HasPrefix(v, "sbx-") {
+						t.Errorf("code volume left: %s", v)
+					}
+				}
+				if sbs, _ := m.Sandboxes(ctx, "app"); len(sbs) != 0 {
+					t.Errorf("sandbox rows left: %+v", sbs)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := lp.bodies["container"]["image"]; got != ref {
+				t.Errorf("container image = %v, want %s", got, ref)
+			}
+			if !lp.pods[PodName(sb.ID)] {
+				t.Errorf("pod %s missing", PodName(sb.ID))
+			}
+		})
+	}
+}
+
+func TestRefreshImage(t *testing.T) {
+	const cf = "FROM docker.io/library/debian:trixie-slim\n"
+	tests := []struct {
+		name       string
+		spec       ProjectSpec
+		failBuild  bool
+		wantPulls  []string
+		wantBuilds int
+		wantErr    bool
+	}{
+		{"registry pulls again", ProjectSpec{Slug: "app", ImageRef: "docker.io/library/x:1"}, false, []string{"docker.io/library/x:1 always"}, 0, false},
+		{"containerfile builds", ProjectSpec{Slug: "app", Containerfile: cf}, false, nil, 1, false},
+		{"failed build", ProjectSpec{Slug: "app", Containerfile: cf}, true, nil, 1, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			m, _, lp := newManager(t)
+			lp.anyImage, lp.failBuild = false, tt.failBuild
+			p, err := m.CreateProject(ctx, tt.spec, userName)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The image is present already; a refresh gets it anyway.
+			lp.images[ProjectImage(p)] = true
+			ref, id, err := m.RefreshImage(ctx, "app")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("RefreshImage = %q, %q, %v", ref, id, err)
+			}
+			if ref != ProjectImage(p) || (!tt.wantErr && id != fakeImageID) {
+				t.Errorf("RefreshImage = %q, %q", ref, id)
+			}
+			if fmt.Sprint(lp.pulls) != fmt.Sprint(tt.wantPulls) || len(lp.builds[ref]) != tt.wantBuilds {
+				t.Errorf("pulls %v builds %v", lp.pulls, lp.builds)
+			}
+			jobs, _ := m.Store.JobsFor(ctx, p.ID)
+			last := jobs[len(jobs)-1]
+			if last.Type != "project.image" || (last.Status == db.JobFailed) != tt.wantErr {
+				t.Errorf("job = %+v", last)
+			}
+		})
+	}
+	m, _, _ := newManager(t)
+	if _, _, err := m.RefreshImage(context.Background(), "missing"); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("missing project: %v", err)
 	}
 }
 

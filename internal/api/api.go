@@ -26,13 +26,22 @@ const DefaultSocket = "/run/wsm/api.sock"
 // maxRequestBody caps a JSON request body.
 const maxRequestBody = 64 << 10
 
+// maxProjectBody caps the body of POST /v1/projects, which can carry a
+// Containerfile of db.MaxContainerfile bytes. JSON escaping can make each
+// byte up to six bytes long.
+const maxProjectBody = 6*db.MaxContainerfile + maxRequestBody
+
 // Project is a project in API responses.
 type Project struct {
-	ID        string    `json:"id"`
-	Slug      string    `json:"slug"`
-	Name      string    `json:"name"`
-	LinuxUser string    `json:"linux_user"`
-	LinuxUID  int       `json:"linux_uid"`
+	ID        string `json:"id"`
+	Slug      string `json:"slug"`
+	Name      string `json:"name"`
+	LinuxUser string `json:"linux_user"`
+	LinuxUID  int    `json:"linux_uid"`
+	// ImageSource is "registry" or "containerfile".
+	ImageSource string `json:"image_source"`
+	// Image is the image sandboxes run: the registry reference, or the tag
+	// wsm builds from the Containerfile.
 	Image     string    `json:"image"`
 	CPUMillis int64     `json:"cpu_millis"`
 	MemBytes  int64     `json:"mem_bytes"`
@@ -50,14 +59,22 @@ type Sandbox struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// CreateProjectRequest is the body of POST /v1/projects.
+// CreateProjectRequest is the body of POST /v1/projects. It has either an
+// Image from a public registry or a Containerfile, not both.
 type CreateProjectRequest struct {
-	Slug      string `json:"slug"`
-	Name      string `json:"name,omitempty"`
-	Image     string `json:"image"`
-	CPUMillis int64  `json:"cpu_millis,omitempty"`
-	MemBytes  int64  `json:"mem_bytes,omitempty"`
-	PidsLimit int64  `json:"pids_limit,omitempty"`
+	Slug          string `json:"slug"`
+	Name          string `json:"name,omitempty"`
+	Image         string `json:"image,omitempty"`
+	Containerfile string `json:"containerfile,omitempty"`
+	CPUMillis     int64  `json:"cpu_millis,omitempty"`
+	MemBytes      int64  `json:"mem_bytes,omitempty"`
+	PidsLimit     int64  `json:"pids_limit,omitempty"`
+}
+
+// ProjectImage is the response of POST /v1/projects/{project}/image.
+type ProjectImage struct {
+	Image string `json:"image"`
+	ID    string `json:"id"`
 }
 
 // CreateSandboxRequest is the body of POST /v1/projects/{project}/sandboxes.
@@ -90,6 +107,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/projects", s.listProjects)
 	mux.HandleFunc("POST /v1/projects", s.createProject)
 	mux.HandleFunc("DELETE /v1/projects/{project}", s.deleteProject)
+	mux.HandleFunc("POST /v1/projects/{project}/image", s.projectImage)
 	mux.HandleFunc("GET /v1/sandboxes", s.listSandboxes)
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes", s.createSandbox)
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes/{sandbox}/start", s.startSandbox)
@@ -120,14 +138,15 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	writeJSON(w, status, Error{Error: err.Error()})
 }
 
-// decodeBody strictly parses a JSON request body into v.
-func decodeBody(r *http.Request, v any) error {
-	data, err := io.ReadAll(io.LimitReader(r.Body, maxRequestBody+1))
+// decodeBody strictly parses a JSON request body of at most limit bytes
+// into v.
+func decodeBody(r *http.Request, limit int64, v any) error {
+	data, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
 	if err != nil {
 		return fmt.Errorf("%w: read body: %v", sandbox.ErrInvalid, err)
 	}
-	if len(data) > maxRequestBody {
-		return fmt.Errorf("%w: body exceeds %d bytes", sandbox.ErrInvalid, maxRequestBody)
+	if int64(len(data)) > limit {
+		return fmt.Errorf("%w: body exceeds %d bytes", sandbox.ErrInvalid, limit)
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.DisallowUnknownFields()
@@ -143,7 +162,7 @@ func decodeBody(r *http.Request, v any) error {
 func toProject(p db.Project) Project {
 	return Project{
 		ID: p.ID, Slug: p.Slug, Name: p.Name, LinuxUser: p.LinuxUser, LinuxUID: p.LinuxUID,
-		Image: p.ImageRef, CPUMillis: p.CPUMillis, MemBytes: p.MemBytes, PidsLimit: p.PidsLimit,
+		ImageSource: p.ImageSource, Image: sandbox.ProjectImage(p), CPUMillis: p.CPUMillis, MemBytes: p.MemBytes, PidsLimit: p.PidsLimit,
 		CreatedAt: p.CreatedAt,
 	}
 }
@@ -168,12 +187,12 @@ func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	var req CreateProjectRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := decodeBody(r, maxProjectBody, &req); err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	p, err := s.Manager.CreateProject(r.Context(), sandbox.ProjectSpec{
-		Slug: req.Slug, Name: req.Name, ImageRef: req.Image,
+		Slug: req.Slug, Name: req.Name, ImageRef: req.Image, Containerfile: req.Containerfile,
 		CPUMillis: req.CPUMillis, MemBytes: req.MemBytes, PidsLimit: req.PidsLimit,
 	}, s.UserName)
 	if err != nil {
@@ -189,6 +208,16 @@ func (s *Server) deleteProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// projectImage builds or pulls a project's image now and waits for it.
+func (s *Server) projectImage(w http.ResponseWriter, r *http.Request) {
+	ref, id, err := s.Manager.RefreshImage(r.Context(), r.PathValue("project"))
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, ProjectImage{Image: ref, ID: id})
 }
 
 func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
@@ -217,7 +246,7 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 	var req CreateSandboxRequest
-	if err := decodeBody(r, &req); err != nil {
+	if err := decodeBody(r, maxRequestBody, &req); err != nil {
 		s.writeError(w, r, err)
 		return
 	}

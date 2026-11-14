@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JCombee/wsm/internal/api"
+	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/terminal"
 )
 
@@ -65,6 +66,25 @@ func parseBytes(s string) (int64, error) {
 	return n * mult, nil
 }
 
+// readContainerfile reads a local Containerfile of at most
+// db.MaxContainerfile bytes. The manager checks the content and stores it
+// in its database only.
+func readContainerfile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("containerfile: %w", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, db.MaxContainerfile+1))
+	if err != nil {
+		return "", fmt.Errorf("containerfile %s: %w", path, err)
+	}
+	if len(data) > db.MaxContainerfile {
+		return "", fmt.Errorf("containerfile %s is larger than %d bytes", path, db.MaxContainerfile)
+	}
+	return string(data), nil
+}
+
 func newFlags(name string) *flag.FlagSet {
 	fs := flag.NewFlagSet(name, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -81,18 +101,24 @@ func runProject(e env) error {
 		fs := newFlags("project create")
 		slug := fs.String("slug", "", "project slug")
 		name := fs.String("name", "", "display name (default: the slug)")
-		image := fs.String("image", "", "workspace image reference")
+		image := fs.String("image", "", "workspace image from a public registry")
+		containerfile := fs.String("containerfile", "", "local Containerfile to build the workspace image from")
 		cpus := fs.String("cpus", "", "CPU limit per sandbox, e.g. 1.5")
 		memory := fs.String("memory", "", "memory limit per sandbox, e.g. 2g")
 		pids := fs.Int64("pids", 0, "process limit per sandbox")
 		if err := fs.Parse(args); err != nil {
 			return usageError{err.Error()}
 		}
-		if fs.NArg() != 0 || *slug == "" || *image == "" {
-			return usageError{"--slug and --image are required"}
+		if fs.NArg() != 0 || *slug == "" || (*image == "") == (*containerfile == "") {
+			return usageError{"--slug and exactly one of --image and --containerfile are required"}
 		}
 		req := api.CreateProjectRequest{Slug: *slug, Name: *name, Image: *image, PidsLimit: *pids}
 		var err error
+		if *containerfile != "" {
+			if req.Containerfile, err = readContainerfile(*containerfile); err != nil {
+				return err
+			}
+		}
 		if *cpus != "" {
 			if req.CPUMillis, err = parseCPUs(*cpus); err != nil {
 				return usageError{err.Error()}
@@ -107,7 +133,17 @@ func runProject(e env) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(e.stdout, "project %s created (user %s, uid %d)\n", p.Slug, p.LinuxUser, p.LinuxUID)
+		fmt.Fprintf(e.stdout, "project %s created (user %s, uid %d, image %s)\n", p.Slug, p.LinuxUser, p.LinuxUID, p.Image)
+		return nil
+	case "image":
+		if len(args) != 1 {
+			return usageError{"want exactly one project"}
+		}
+		img, err := c.ProjectImage(e.ctx, args[0])
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(e.stdout, "project %s image %s id %s\n", args[0], img.Image, img.ID)
 		return nil
 	case "list":
 		if len(args) != 0 {
@@ -118,9 +154,9 @@ func runProject(e env) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(e.stdout, 0, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "SLUG\tUSER\tIMAGE\tCPUS\tMEMORY\tPIDS")
+		fmt.Fprintln(tw, "SLUG\tUSER\tSOURCE\tIMAGE\tCPUS\tMEMORY\tPIDS")
 		for _, p := range ps {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%.2f\t%dMiB\t%d\n", p.Slug, p.LinuxUser, p.Image,
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%.2f\t%dMiB\t%d\n", p.Slug, p.LinuxUser, p.ImageSource, p.Image,
 				float64(p.CPUMillis)/1000, p.MemBytes>>20, p.PidsLimit)
 		}
 		return tw.Flush()
