@@ -37,6 +37,17 @@ const (
 	DefaultMCPPort  = 7443
 )
 
+// The ports shared service instances publish on wsm0 (ADR 0013). The
+// manager hands them out, wsm-helper accepts only ports in this range, and
+// the database repeats it in a CHECK constraint.
+const (
+	ServicePortMin = 20000
+	ServicePortMax = 20999
+)
+
+// ValidServicePort reports whether port is in the service port range.
+func ValidServicePort(port int) bool { return port >= ServicePortMin && port <= ServicePortMax }
+
 // Config is the input for the base ruleset.
 type Config struct {
 	UIDMin, UIDMax int
