@@ -9,9 +9,11 @@ import (
 	"time"
 
 	"github.com/JCombee/wsm/internal/api"
+	"github.com/JCombee/wsm/internal/audit"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/helper"
+	"github.com/JCombee/wsm/internal/mcp"
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/sandbox"
 	"github.com/JCombee/wsm/internal/sdsocket"
@@ -67,8 +69,9 @@ func runServe(e env) error {
 		return fmt.Errorf("load base rules: %w", err)
 	}
 
+	store := db.NewStore(sqlDB)
 	mgr := &sandbox.Manager{
-		Store: db.NewStore(sqlDB),
+		Store: store,
 		Users: hc,
 		Podman: func(uid int) *podman.Client {
 			return podman.NewClient(helper.PodmanSocket(uid))
@@ -77,28 +80,48 @@ func runServe(e env) error {
 		Mirrors: mirrors,
 		Logf:    logger.Printf,
 	}
-	srv := &http.Server{
+	apiSrv := &http.Server{
 		Handler:           (&api.Server{Manager: mgr, UserName: helper.UserName, Logf: logger.Printf}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          logger,
 	}
+	// The MCP server listens only on wsm0, which SetupWSM0 created above
+	// (ADR 0012). Without it there is no MCP, so wsm does not start.
+	mcpSrv := mcp.NewHTTPServer((&mcp.Server{
+		Store: store, Audit: audit.New(sqlDB), Logf: logger.Printf, Version: version,
+	}).Handler(), logger)
+	mcpLn, err := mcp.Listen(ctx)
+	if err != nil {
+		return fmt.Errorf("mcp: %w", err)
+	}
 	ln, err := sdsocket.Listen(*socket, 0o660)
 	if err != nil {
+		mcpLn.Close()
 		return err
 	}
-	errc := make(chan error, 1)
-	go func() { errc <- srv.Serve(ln) }()
-	logger.Printf("wsm %s serving on %s", version, ln.Addr())
+	errc := make(chan error, 2)
+	go func() { errc <- fmt.Errorf("serve api: %w", apiSrv.Serve(ln)) }()
+	go func() { errc <- fmt.Errorf("serve mcp: %w", mcpSrv.Serve(mcpLn)) }()
+	logger.Printf("wsm %s serving the api on %s and mcp on %s", version, ln.Addr(), mcpLn.Addr())
 
+	var serveErr error
 	select {
-	case err := <-errc:
-		return fmt.Errorf("serve: %w", err)
+	case serveErr = <-errc:
 	case <-ctx.Done():
 	}
 	shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
-		return err
+	var shutdownErr error
+	for _, srv := range []*http.Server{apiSrv, mcpSrv} {
+		if err := srv.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) && shutdownErr == nil {
+			shutdownErr = err
+		}
+	}
+	if serveErr != nil {
+		return serveErr
+	}
+	if shutdownErr != nil {
+		return shutdownErr
 	}
 	logger.Printf("wsm stopped")
 	return nil
