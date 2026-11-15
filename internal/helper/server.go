@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -18,6 +19,16 @@ type Ops interface {
 	DeleteProjectUser(ctx context.Context, uid int) error
 	SetupWSM0(ctx context.Context) error
 	ApplyBaseRules(ctx context.Context) error
+	// PullServiceImage makes sure the image of a shared block for tag is
+	// present for the service user.
+	PullServiceImage(ctx context.Context, service, tag string) error
+	// EnsureServiceInstance writes and starts the instance of a shared
+	// block for tag on port, with password as its root password.
+	EnsureServiceInstance(ctx context.Context, service, tag string, port int, password string) error
+	// AllowService lets project user uid reach the service port on wsm0.
+	AllowService(ctx context.Context, uid, port int) error
+	// RevokeService takes that again; a missing grant is not an error.
+	RevokeService(ctx context.Context, uid, port int) error
 }
 
 // Server answers requests from exactly one peer UID: the manager's.
@@ -27,6 +38,9 @@ type Server struct {
 	Logf       func(format string, args ...any)
 	// OpTimeout bounds one operation; zero means two minutes.
 	OpTimeout time.Duration
+	// LongOpTimeout bounds pulls and ensures of service instances; zero
+	// means ten minutes.
+	LongOpTimeout time.Duration
 
 	mu sync.Mutex // serializes operations
 }
@@ -120,27 +134,51 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	}
 	err = s.do(ctx, req)
 	if err != nil {
-		s.logf("%s %s: failed: %v", req.Type, uidString(req), err)
+		s.logf("%s %s: failed: %v", req.Type, describe(req), err)
 		writeResponse(conn, Response{Error: err.Error()})
 		return
 	}
-	s.logf("%s %s: ok", req.Type, uidString(req))
+	s.logf("%s %s: ok", req.Type, describe(req))
 	writeResponse(conn, Response{OK: true})
 }
 
-func uidString(r Request) string {
-	if r.UID == nil {
+// describe names the fields of a request for the log: never the password.
+func describe(r Request) string {
+	var b strings.Builder
+	if r.UID != nil {
+		fmt.Fprintf(&b, " uid=%d", *r.UID)
+	}
+	if r.Service != "" {
+		fmt.Fprintf(&b, " service=%s", r.Service)
+	}
+	if r.Tag != "" {
+		fmt.Fprintf(&b, " tag=%s", r.Tag)
+	}
+	if r.Port != nil {
+		fmt.Fprintf(&b, " port=%d", *r.Port)
+	}
+	if b.Len() == 0 {
 		return "-"
 	}
-	return fmt.Sprintf("uid=%d", *r.UID)
+	return b.String()[1:]
+}
+
+// timeout returns how long an operation of type typ may take.
+func (s *Server) timeout(typ string) time.Duration {
+	if typ == TypePullServiceImage || typ == TypeEnsureServiceInstance {
+		if s.LongOpTimeout != 0 {
+			return s.LongOpTimeout
+		}
+		return 10 * time.Minute
+	}
+	if s.OpTimeout != 0 {
+		return s.OpTimeout
+	}
+	return 2 * time.Minute
 }
 
 func (s *Server) do(ctx context.Context, req Request) error {
-	timeout := s.OpTimeout
-	if timeout == 0 {
-		timeout = 2 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, s.timeout(req.Type))
 	defer cancel()
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -157,6 +195,14 @@ func (s *Server) do(ctx context.Context, req Request) error {
 		return s.Ops.SetupWSM0(ctx)
 	case TypeApplyBaseRules:
 		return s.Ops.ApplyBaseRules(ctx)
+	case TypePullServiceImage:
+		return s.Ops.PullServiceImage(ctx, req.Service, req.Tag)
+	case TypeEnsureServiceInstance:
+		return s.Ops.EnsureServiceInstance(ctx, req.Service, req.Tag, *req.Port, req.Password)
+	case TypeAllowService:
+		return s.Ops.AllowService(ctx, *req.UID, *req.Port)
+	case TypeRevokeService:
+		return s.Ops.RevokeService(ctx, *req.UID, *req.Port)
 	}
 	return fmt.Errorf("unknown request type %q", req.Type)
 }

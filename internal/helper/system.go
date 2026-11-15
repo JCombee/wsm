@@ -109,19 +109,37 @@ func run(ctx context.Context, stdin io.Reader, env []string, name string, args .
 	return out.String(), nil
 }
 
-// runAsUser runs a tool as the project user of uid, with the environment
-// its systemd user instance and rootless Podman need.
-func runAsUser(ctx context.Context, uid int, name string, args ...string) (string, error) {
+// account is a non-root user the helper runs tools as. Its fields are
+// fixed or derived from a validated UID, never taken from a request.
+type account struct {
+	name string
+	uid  int
+	home string
+}
+
+// projectAccount returns the account of the project user for uid.
+func projectAccount(uid int) account {
+	return account{name: UserName(uid), uid: uid, home: HomeDir(uid)}
+}
+
+// runAs runs a tool as a, with the environment its systemd user instance
+// and rootless Podman need, and stdin from stdin (nil for none).
+func runAs(ctx context.Context, a account, stdin io.Reader, name string, args ...string) (string, error) {
 	path, err := lookTool(name)
 	if err != nil {
 		return "", err
 	}
-	full := append([]string{"-u", UserName(uid), "--", path}, args...)
-	return run(ctx, nil, []string{
-		"HOME=" + HomeDir(uid),
-		fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", uid),
-		fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus", uid),
+	full := append([]string{"-u", a.name, "--", path}, args...)
+	return run(ctx, stdin, []string{
+		"HOME=" + a.home,
+		fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", a.uid),
+		fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus", a.uid),
 	}, "runuser", full...)
+}
+
+// runAsUser runs a tool as the project user of uid.
+func runAsUser(ctx context.Context, uid int, name string, args ...string) (string, error) {
+	return runAs(ctx, projectAccount(uid), nil, name, args...)
 }
 
 // cappedBuffer keeps the first maxToolOutput bytes written to it.

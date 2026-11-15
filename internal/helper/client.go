@@ -90,3 +90,34 @@ func (c *Client) SetupWSM0(ctx context.Context) error {
 func (c *Client) ApplyBaseRules(ctx context.Context) error {
 	return c.Do(ctx, Request{Type: TypeApplyBaseRules})
 }
+
+// serviceDeadline bounds a pull or ensure on the client side. It is longer
+// than the helper's ten minutes, so the helper's own error arrives first.
+const serviceDeadline = 11 * time.Minute
+
+// PullServiceImage asks the helper to pull the image of a shared block for
+// tag, unless it is present already.
+func (c *Client) PullServiceImage(ctx context.Context, service, tag string) error {
+	ctx, cancel := context.WithTimeout(ctx, serviceDeadline)
+	defer cancel()
+	return c.Do(ctx, Request{Type: TypePullServiceImage, Service: service, Tag: tag})
+}
+
+// EnsureServiceInstance asks the helper to write and start the instance of
+// a shared block for tag on port, with password as its root password.
+func (c *Client) EnsureServiceInstance(ctx context.Context, service, tag string, port int, password string) error {
+	ctx, cancel := context.WithTimeout(ctx, serviceDeadline)
+	defer cancel()
+	return c.Do(ctx, Request{Type: TypeEnsureServiceInstance, Service: service, Tag: tag,
+		Port: &port, Password: password})
+}
+
+// AllowService asks the helper to let project user uid reach port on wsm0.
+func (c *Client) AllowService(ctx context.Context, uid, port int) error {
+	return c.Do(ctx, Request{Type: TypeAllowService, UID: &uid, Port: &port})
+}
+
+// RevokeService asks the helper to take that grant away again.
+func (c *Client) RevokeService(ctx context.Context, uid, port int) error {
+	return c.Do(ctx, Request{Type: TypeRevokeService, UID: &uid, Port: &port})
+}

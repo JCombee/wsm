@@ -3,6 +3,7 @@ package helper
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"os"
@@ -37,6 +38,18 @@ func (f *fakeOps) DeleteProjectUser(_ context.Context, uid int) error {
 }
 func (f *fakeOps) SetupWSM0(context.Context) error      { return f.record("wsm0") }
 func (f *fakeOps) ApplyBaseRules(context.Context) error { return f.record("rules") }
+func (f *fakeOps) PullServiceImage(_ context.Context, service, tag string) error {
+	return f.record("pull " + service + " " + tag)
+}
+func (f *fakeOps) EnsureServiceInstance(_ context.Context, service, tag string, port int, _ string) error {
+	return f.record(fmt.Sprintf("ensure %s %s %d", service, tag, port))
+}
+func (f *fakeOps) AllowService(_ context.Context, uid, port int) error {
+	return f.record(fmt.Sprintf("allow %d %d", uid, port))
+}
+func (f *fakeOps) RevokeService(_ context.Context, uid, port int) error {
+	return f.record(fmt.Sprintf("revoke %d %d", uid, port))
+}
 
 func (f *fakeOps) Calls() []string {
 	f.mu.Lock()
