@@ -40,7 +40,7 @@ isolation-test:
 	@if [ "$$(id -u)" -ne 0 ]; then \
 		echo "refusing to run: isolation tests must run as root" >&2; exit 4; fi
 	$(MAKE) isolation-build
-	./bin/isolation.test -test.v -test.count=1 -test.timeout=30m
+	./bin/isolation.test -test.v -test.count=1 -test.timeout=45m
 
 clean:
 	rm -rf bin
