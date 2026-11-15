@@ -530,13 +530,20 @@ func serviceState(ctx context.Context, t *testing.T) string {
 	els := svcElements(ctx, t)
 	sort.Slice(els, func(i, j int) bool { return fmt.Sprint(els[i]) < fmt.Sprint(els[j]) })
 	fmt.Fprintf(&b, "elements %v\n", els)
-	secrets, err := asSvc(ctx, t, "podman", "secret", "ls", "--format", "{{.Name}} {{.UpdatedAt}}")
+	// "secret ls" shows UpdatedAt relative to now; inspect gives the time.
+	names, err := asSvc(ctx, t, "podman", "secret", "ls", "--noheading", "--format", "{{.Name}}")
 	if err != nil {
-		t.Fatalf("podman secret ls: %v: %s", err, secrets)
+		t.Fatalf("podman secret ls: %v: %s", err, names)
 	}
-	lines := strings.Split(strings.TrimSpace(secrets), "\n")
-	sort.Strings(lines)
-	fmt.Fprintf(&b, "secrets %v\n", lines)
+	list := strings.Fields(names)
+	sort.Strings(list)
+	for _, n := range list {
+		info, err := asSvc(ctx, t, "podman", "secret", "inspect", "--format", "{{.ID}} {{.UpdatedAt}}", n)
+		if err != nil {
+			t.Fatalf("podman secret inspect %s: %v: %s", n, err, info)
+		}
+		fmt.Fprintf(&b, "secret %s %s\n", n, strings.TrimSpace(info))
+	}
 	return b.String()
 }
 
@@ -648,7 +655,8 @@ func rootLogin(ctx context.Context, t *testing.T, container, pw string) (bool, s
 	out, err := asSvcEnv(ctx, t, []string{"MYSQL_PWD=" + pw},
 		"podman", "exec", "-e", "MYSQL_PWD", container,
 		"mariadb", "-h127.0.0.1", "--protocol=tcp", "-uroot", "-N", "-e", "SELECT 42")
-	return err == nil && strings.TrimSpace(out) == "42", out
+	// The client may print a TLS warning before the result.
+	return err == nil && regexp.MustCompile(`(?m)^42$`).MatchString(out), out
 }
 
 func TestServiceRootPasswordNotLeaked(t *testing.T) {
