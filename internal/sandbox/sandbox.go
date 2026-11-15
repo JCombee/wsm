@@ -17,6 +17,7 @@ import (
 
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/gitmgr"
+	"github.com/JCombee/wsm/internal/mcptoken"
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/secret"
 )
@@ -400,7 +401,9 @@ func workCommand(cfg podman.ImageConfig) []string {
 // WorkSpec returns the workspace container for a sandbox, with the
 // hardening of CLAUDE.md invariant 9. The only volumes are the sandbox's
 // code volume and the project's home volume; there are no host mounts.
-func WorkSpec(p db.Project, sb db.Sandbox, cmd []string) podman.ContainerSpec {
+// mcpToken is the sandbox's MCP bearer token; the environment is the only
+// place it is kept (ADR 0012).
+func WorkSpec(p db.Project, sb db.Sandbox, cmd []string, mcpToken string) podman.ContainerSpec {
 	return podman.ContainerSpec{
 		Name:            WorkContainer(sb.ID),
 		Image:           ProjectImage(p),
@@ -408,7 +411,7 @@ func WorkSpec(p db.Project, sb db.Sandbox, cmd []string) podman.ContainerSpec {
 		Labels:          labels(p, sb),
 		User:            strconv.Itoa(ContainerUID) + ":" + strconv.Itoa(ContainerGID),
 		Command:         cmd,
-		Env:             workEnv(p, sb),
+		Env:             workEnv(p, sb, mcpToken),
 		WorkDir:         WorkspaceDir,
 		Init:            true,
 		CapDrop:         []string{"ALL"},
@@ -426,7 +429,7 @@ func WorkSpec(p db.Project, sb db.Sandbox, cmd []string) podman.ContainerSpec {
 }
 
 // workEnv is the workspace container's environment (plan section 3.4).
-func workEnv(p db.Project, sb db.Sandbox) map[string]string {
+func workEnv(p db.Project, sb db.Sandbox, mcpToken string) map[string]string {
 	env := map[string]string{
 		"WSM_PROJECT": p.Slug,
 		"WSM_SANDBOX": sb.Slug,
@@ -434,6 +437,10 @@ func workEnv(p db.Project, sb db.Sandbox) map[string]string {
 	}
 	if sb.Branch != "" {
 		env["WSM_BRANCH"] = sb.Branch
+	}
+	if mcpToken != "" {
+		env["WSM_MCP_URL"] = mcptoken.URL(sb.ID)
+		env["WSM_MCP_TOKEN"] = mcpToken
 	}
 	return env
 }
@@ -456,7 +463,8 @@ func labels(p db.Project, sb db.Sandbox) map[string]string {
 
 // CreateSandbox stores a sandbox and creates its pod, volumes and workspace
 // container. The sandbox is not started. On failure everything is rolled
-// back.
+// back. The sandbox gets a new MCP bearer token: the database keeps its
+// hash, and only the workspace container's environment has the token.
 func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (db.Sandbox, error) {
 	if !ValidSlug(slug) {
 		return db.Sandbox{}, fmt.Errorf("%w: slug %q: use 1-32 lowercase letters, digits and dashes, starting with a letter", ErrInvalid, slug)
@@ -467,7 +475,11 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 	if err != nil {
 		return db.Sandbox{}, err
 	}
-	sb := db.Sandbox{ProjectID: p.ID, Slug: slug, Status: db.StatusCreated}
+	token, tokenHash, err := mcptoken.New()
+	if err != nil {
+		return db.Sandbox{}, err
+	}
+	sb := db.Sandbox{ProjectID: p.ID, Slug: slug, Status: db.StatusCreated, MCPTokenHash: tokenHash}
 	if p.HasRepo() {
 		sb.Branch = SandboxBranch(slug)
 	}
@@ -477,7 +489,7 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 	pc := m.Podman(p.LinuxUID)
 	defer pc.Close()
 	err = m.job(ctx, "sandbox.create", sb.ID, func() error {
-		return m.createPodman(ctx, pc, p, sb)
+		return m.createPodman(ctx, pc, p, sb, token)
 	})
 	if err != nil {
 		bg := context.WithoutCancel(ctx)
@@ -493,7 +505,7 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 	return sb, nil
 }
 
-func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Project, sb db.Sandbox) error {
+func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Project, sb db.Sandbox, mcpToken string) error {
 	if err := m.ensureImage(ctx, pc, p); err != nil {
 		return err
 	}
@@ -510,7 +522,7 @@ func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Proj
 	if _, err := pc.PodCreate(ctx, PodSpec(p, sb)); err != nil {
 		return err
 	}
-	if _, err := pc.ContainerCreate(ctx, WorkSpec(p, sb, workCommand(cfg))); err != nil {
+	if _, err := pc.ContainerCreate(ctx, WorkSpec(p, sb, workCommand(cfg), mcpToken)); err != nil {
 		return err
 	}
 	return nil

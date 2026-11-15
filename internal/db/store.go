@@ -129,6 +129,10 @@ type Sandbox struct {
 	Branch string
 	// SeededAt is when the code arrived in /workspace; nil until then.
 	SeededAt *time.Time
+	// MCPTokenHash is the SHA-256 of the sandbox's MCP bearer token, as
+	// lowercase hex (ADR 0012). The token itself is never stored. It is
+	// empty for sandboxes from before migration 00005.
+	MCPTokenHash string
 }
 
 // Store reads and writes projects, sandboxes and jobs.
@@ -331,10 +335,11 @@ func (s *Store) CreateSandbox(ctx context.Context, sb *Sandbox, podName func(id 
 		sb.Status = StatusCreated
 	}
 	_, err = s.DB.ExecContext(ctx, `
-		INSERT INTO sandboxes (id, project_id, slug, status, pod_name, created_at, branch)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		INSERT INTO sandboxes (id, project_id, slug, status, pod_name, created_at, branch,
+			mcp_token_hash)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		sb.ID, sb.ProjectID, sb.Slug, sb.Status, sb.PodName, formatTime(sb.CreatedAt),
-		nullString(sb.Branch))
+		nullString(sb.Branch), nullString(sb.MCPTokenHash))
 	if err != nil {
 		return fmt.Errorf("create sandbox %q: %w", sb.Slug, mapErr(err))
 	}
@@ -342,17 +347,18 @@ func (s *Store) CreateSandbox(ctx context.Context, sb *Sandbox, podName func(id 
 }
 
 const sandboxColumns = `id, project_id, slug, status, pod_name, created_at, last_activity_at,
-	branch, seeded_at`
+	branch, seeded_at, mcp_token_hash`
 
 func scanSandbox(row interface{ Scan(...any) error }) (Sandbox, error) {
 	var sb Sandbox
 	var created string
-	var activity, branch, seeded sql.NullString
+	var activity, branch, seeded, tokenHash sql.NullString
 	if err := row.Scan(&sb.ID, &sb.ProjectID, &sb.Slug, &sb.Status, &sb.PodName,
-		&created, &activity, &branch, &seeded); err != nil {
+		&created, &activity, &branch, &seeded, &tokenHash); err != nil {
 		return sb, mapErr(err)
 	}
 	sb.Branch = branch.String
+	sb.MCPTokenHash = tokenHash.String
 	if seeded.Valid {
 		t, err := parseTime(seeded.String)
 		if err != nil {
@@ -384,6 +390,25 @@ func (s *Store) SandboxBySlug(ctx context.Context, projectID, slug string) (Sand
 		return sb, fmt.Errorf("sandbox %q: %w", slug, err)
 	}
 	return sb, nil
+}
+
+// SandboxByTokenHash returns the sandbox whose MCP token has the given
+// hash, and its project. An empty hash never matches.
+func (s *Store) SandboxByTokenHash(ctx context.Context, hash string) (Project, Sandbox, error) {
+	if hash == "" {
+		return Project{}, Sandbox{}, fmt.Errorf("sandbox by token: %w", ErrNotFound)
+	}
+	row := s.DB.QueryRowContext(ctx, `SELECT `+sandboxColumns+`
+		FROM sandboxes WHERE mcp_token_hash = ?`, hash)
+	sb, err := scanSandbox(row)
+	if err != nil {
+		return Project{}, Sandbox{}, fmt.Errorf("sandbox by token: %w", err)
+	}
+	p, err := s.ProjectByID(ctx, sb.ProjectID)
+	if err != nil {
+		return Project{}, Sandbox{}, fmt.Errorf("sandbox by token: %w", err)
+	}
+	return p, sb, nil
 }
 
 // Sandboxes returns the sandboxes of a project, or of all projects when
@@ -440,7 +465,7 @@ func (s *Store) MarkSandboxSeeded(ctx context.Context, id string) error {
 	return nil
 }
 
-// TouchSandbox records activity (terminal, later MCP) on a sandbox.
+// TouchSandbox records activity (terminal, MCP) on a sandbox.
 func (s *Store) TouchSandbox(ctx context.Context, id string) error {
 	_, err := s.DB.ExecContext(ctx, `UPDATE sandboxes SET last_activity_at = ? WHERE id = ?`,
 		formatTime(s.Now()), id)
