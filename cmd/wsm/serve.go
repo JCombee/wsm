@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/netip"
 	"time"
 
 	"github.com/JCombee/wsm/internal/api"
 	"github.com/JCombee/wsm/internal/audit"
+	"github.com/JCombee/wsm/internal/broker"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/helper"
 	"github.com/JCombee/wsm/internal/mcp"
+	"github.com/JCombee/wsm/internal/netpolicy"
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/sandbox"
 	"github.com/JCombee/wsm/internal/sdsocket"
@@ -80,8 +83,20 @@ func runServe(e env) error {
 		Mirrors: mirrors,
 		Logf:    logger.Printf,
 	}
+	brk := &broker.Broker{
+		Store:   store,
+		Helper:  hc,
+		Secrets: box,
+		Addr:    netip.MustParseAddr(netpolicy.DefaultWSM0Addr),
+		Logf:    logger.Printf,
+	}
+	// Bring every shared service instance back in line with its template,
+	// in the background: the API and the MCP do not wait for it (ADR 0013).
+	go brk.EnsureAll(ctx)
+
 	apiSrv := &http.Server{
-		Handler:           (&api.Server{Manager: mgr, UserName: helper.UserName, Logf: logger.Printf}).Handler(),
+		Handler: (&api.Server{Manager: mgr, Broker: brk, UserName: helper.UserName,
+			Logf: logger.Printf}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 		ErrorLog:          logger,
 	}

@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/JCombee/wsm/internal/broker"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/sandbox"
 	"github.com/JCombee/wsm/internal/terminal"
@@ -104,6 +105,8 @@ type Error struct {
 // Server serves the API.
 type Server struct {
 	Manager *sandbox.Manager
+	// Broker manages project ceilings and shared service instances.
+	Broker *broker.Broker
 	// UserName derives a project's Linux user name from its UID.
 	UserName func(uid int) string
 	Logf     func(format string, args ...any)
@@ -123,6 +126,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/projects/{project}", s.deleteProject)
 	mux.HandleFunc("POST /v1/projects/{project}/image", s.projectImage)
 	mux.HandleFunc("GET /v1/projects/{project}/key", s.deployKey)
+	mux.HandleFunc("GET /v1/projects/{project}/blocks", s.listBlocks)
+	mux.HandleFunc("PUT /v1/projects/{project}/blocks/{block}", s.setBlock)
+	mux.HandleFunc("DELETE /v1/projects/{project}/blocks/{block}", s.removeBlock)
+	mux.HandleFunc("GET /v1/services", s.listServices)
 	mux.HandleFunc("GET /v1/sandboxes", s.listSandboxes)
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes", s.createSandbox)
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes/{sandbox}/start", s.startSandbox)

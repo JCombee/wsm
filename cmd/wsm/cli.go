@@ -180,6 +180,8 @@ func runProject(e env) error {
 				float64(p.CPUMillis)/1000, p.MemBytes>>20, p.PidsLimit)
 		}
 		return tw.Flush()
+	case "block":
+		return runProjectBlock(e, c, args)
 	case "delete":
 		if len(args) != 1 {
 			return usageError{"want exactly one project"}

@@ -124,6 +124,33 @@ func (c *Client) DeleteProject(ctx context.Context, project string) error {
 	return c.do(ctx, http.MethodDelete, "/v1/projects/"+url.PathEscape(project), nil, nil)
 }
 
+// Blocks lists the ceilings of a project.
+func (c *Client) Blocks(ctx context.Context, project string) ([]Block, error) {
+	var out []Block
+	err := c.do(ctx, http.MethodGet, blocksPath(project), nil, &out)
+	return out, err
+}
+
+// SetBlock sets the ceiling of a project for a block and waits until every
+// instance it names is ready.
+func (c *Client) SetBlock(ctx context.Context, project, block string, req SetBlockRequest) (Block, error) {
+	var out Block
+	err := c.do(ctx, http.MethodPut, blocksPath(project)+"/"+url.PathEscape(block), req, &out)
+	return out, err
+}
+
+// RemoveBlock removes the ceiling of a project for a block.
+func (c *Client) RemoveBlock(ctx context.Context, project, block string) error {
+	return c.do(ctx, http.MethodDelete, blocksPath(project)+"/"+url.PathEscape(block), nil, nil)
+}
+
+// Services lists the shared service instances with their live state.
+func (c *Client) Services(ctx context.Context) ([]Service, error) {
+	var out []Service
+	err := c.do(ctx, http.MethodGet, "/v1/services", nil, &out)
+	return out, err
+}
+
 // Sandboxes lists sandboxes, of one project when project is not empty.
 func (c *Client) Sandboxes(ctx context.Context, project string) ([]Sandbox, error) {
 	path := "/v1/sandboxes"
