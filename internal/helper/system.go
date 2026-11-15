@@ -400,6 +400,10 @@ func (o *SystemOps) DeleteProjectUser(ctx context.Context, uid int) error {
 	if err != nil {
 		return err
 	}
+	// UIDs are reused, so the grants of this one go first, before the user.
+	if err := o.revokeAllServices(ctx, uid); err != nil {
+		return fmt.Errorf("revoke service grants of %s: %w", name, err)
+	}
 	if u != nil {
 		o.logf("deleting user %s", name)
 		// Best effort: remove the user's containers, images and volumes

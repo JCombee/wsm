@@ -1,5 +1,13 @@
 # wsm-helper: the only part of wsm that runs as root. It creates and removes
-# project users, sets up wsm0 and loads the nftables base rules.
+# project users, sets up wsm0, loads the nftables base rules and the
+# per-grant elements of svc_allow4, and writes the Quadlet units of the
+# shared service instances under /etc/containers/systemd/users/<wsm-svc uid>
+# (ADR 0013), so it needs write access to /etc: no ProtectSystem.
+#
+# PrivateTmp stays on. Podman for wsm-svc therefore never runs as a child
+# of this service: the helper starts it with "systemd-run --user" inside
+# wsm-svc's own user manager, so Podman's pause process does not inherit
+# this private /tmp, which disappears when the helper stops.
 [Unit]
 Description=wsm privileged helper
 Requires=wsm-helper.socket

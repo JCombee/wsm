@@ -74,6 +74,23 @@ if [[ -n $ADMIN ]]; then
 	usermod --append --groups wsm-admin "$ADMIN"
 fi
 
+# wsm-svc runs the shared service instances as rootless Quadlet units
+# (ADR 0013). wsm-helper writes one unit per instance; this script only
+# prepares the user and pulls no images. The subordinate IDs are a fixed
+# range below the project users' ranges (uid * 65536 from 50000 on).
+log "preparing service user wsm-svc"
+SVC_SUBIDS=1879048192-1879113727
+if ! id -u wsm-svc >/dev/null 2>&1; then
+	useradd --system --user-group --home-dir /var/lib/wsm-svc --create-home \
+		--shell /usr/sbin/nologin --comment "wsm shared services" wsm-svc
+fi
+install -d -m 0700 -o wsm-svc -g wsm-svc /var/lib/wsm-svc
+grep -q '^wsm-svc:' /etc/subuid 2>/dev/null || usermod --add-subuids "$SVC_SUBIDS" wsm-svc
+grep -q '^wsm-svc:' /etc/subgid 2>/dev/null || usermod --add-subgids "$SVC_SUBIDS" wsm-svc
+loginctl enable-linger wsm-svc
+SVC_UID=$(id -u wsm-svc)
+install -d -m 0755 -o root -g root /etc/containers/systemd/users/"$SVC_UID"
+
 log "installing binaries"
 install -m 0755 -o root -g root "$BIN_SRC/wsm" /usr/local/bin/wsm
 install -m 0755 -o root -g root "$BIN_SRC/wsm-helper" /usr/local/bin/wsm-helper

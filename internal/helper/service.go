@@ -262,12 +262,52 @@ func ensureRootDirs(dirs ...string) error {
 	return nil
 }
 
-// AllowService lets project user uid reach port on wsm0.
+// AllowService lets project user uid reach port on wsm0, by adding the
+// element uid . wsm0 . port to svc_allow4.
 func (o *SystemOps) AllowService(ctx context.Context, uid, port int) error {
-	return errors.New("allow_service is not implemented yet")
+	script, err := netpolicy.AllowServiceScript(o.WSM0Addr, uid, port)
+	if err != nil {
+		return err
+	}
+	_, err = run(ctx, strings.NewReader(script), nil, "nft", "-f", "-")
+	return err
 }
 
-// RevokeService takes a grant away again.
+// RevokeService removes that element; a missing one is not an error.
 func (o *SystemOps) RevokeService(ctx context.Context, uid, port int) error {
-	return errors.New("revoke_service is not implemented yet")
+	script, err := netpolicy.RevokeServiceScript(o.WSM0Addr, uid, port)
+	if err != nil {
+		return err
+	}
+	_, err = run(ctx, strings.NewReader(script), nil, "nft", "-f", "-")
+	return err
+}
+
+// revokeAllServices removes every grant of uid from svc_allow4. Without
+// table inet wsm there is nothing to remove.
+func (o *SystemOps) revokeAllServices(ctx context.Context, uid int) error {
+	out, err := run(ctx, nil, nil, "nft", "list", "tables")
+	if err != nil {
+		return err
+	}
+	if !hasLine(out, "table "+netpolicy.Table) {
+		return nil
+	}
+	script, err := netpolicy.RevokeAllServicesScript(o.WSM0Addr, uid)
+	if err != nil {
+		return err
+	}
+	_, err = run(ctx, strings.NewReader(script), nil, "nft", "-f", "-")
+	return err
+}
+
+// hasLine reports whether out has a line equal to line, ignoring spaces
+// around it.
+func hasLine(out, line string) bool {
+	for _, l := range strings.Split(out, "\n") {
+		if strings.TrimSpace(l) == line {
+			return true
+		}
+	}
+	return false
 }
