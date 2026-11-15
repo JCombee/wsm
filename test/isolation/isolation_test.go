@@ -400,14 +400,32 @@ func TestManagerAPINotReachable(t *testing.T) {
 			t.Errorf("%s: /run/wsm exists in the sandbox %s", p.slug, out)
 		}
 	}
-	// The manager has no TCP listener in M1.
+	// The manager's only TCP listener is the MCP server on wsm0 (ADR 0012).
 	out, err := run(ctx, "ss", "-Hltnp")
 	if err != nil {
 		t.Fatal(err)
 	}
+	var listeners []string
 	for _, line := range strings.Split(out, "\n") {
-		if strings.Contains(line, `"wsm"`) {
-			t.Errorf("wsm listens on TCP: %s", line)
+		if !strings.Contains(line, `"wsm"`) {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) < 4 {
+			t.Errorf("unreadable ss line: %s", line)
+			continue
+		}
+		listeners = append(listeners, f[3])
+	}
+	if len(listeners) != 1 || listeners[0] != "10.255.0.1:7443" {
+		t.Errorf("wsm TCP listeners = %v, want only 10.255.0.1:7443", listeners)
+	}
+	// Root reaches the MCP port neither on loopback nor on the host's
+	// address: nothing listens there.
+	for _, addr := range []string{"127.0.0.1:7443", net.JoinHostPort(s.hostAddr, "7443")} {
+		if c, err := net.DialTimeout("tcp", addr, 3*time.Second); err == nil {
+			c.Close()
+			t.Errorf("root reached %s", addr)
 		}
 	}
 }

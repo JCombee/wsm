@@ -102,6 +102,10 @@ func TestMain(m *testing.M) {
 // what happened and exits 0 when the action succeeded.
 func probe(spec string) int {
 	kind, target, _ := strings.Cut(spec, ":")
+	if kind == "mcp" {
+		// Runs inside a workspace container; see mcp_test.go.
+		return mcpProbe(os.Stdin, os.Stdout)
+	}
 	var err error
 	switch kind {
 	case "unix", "tcp":
@@ -148,12 +152,17 @@ func runIn(ctx context.Context, stdin io.Reader, name string, args ...string) (s
 // asUser runs a command as a project user, with the environment rootless
 // Podman needs.
 func asUser(ctx context.Context, p project, args ...string) (string, error) {
+	return asUserIn(ctx, p, nil, args...)
+}
+
+// asUserIn is asUser with stdin.
+func asUserIn(ctx context.Context, p project, stdin io.Reader, args ...string) (string, error) {
 	full := append([]string{"-u", p.user, "--", "env",
 		"HOME=" + helper.HomeDir(p.uid),
 		fmt.Sprintf("XDG_RUNTIME_DIR=/run/user/%d", p.uid),
 		fmt.Sprintf("DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%d/bus", p.uid),
 	}, args...)
-	return run(ctx, "runuser", full...)
+	return runIn(ctx, stdin, "runuser", full...)
 }
 
 // inSandbox runs a command in a project's workspace container.
