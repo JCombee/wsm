@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"testing"
@@ -60,14 +61,20 @@ func TestRedisSpec(t *testing.T) {
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("spec =\n%+v\nwant\n%+v", got, want)
 	}
-	// The JSON body has no volumes, ports, host paths, env or init.
+	// The JSON body has exactly these keys: no volumes, ports, host paths,
+	// env or init.
 	b, _ := json.Marshal(got)
 	var body map[string]any
 	json.Unmarshal(b, &body)
-	for _, k := range []string{"volumes", "mounts", "portmappings", "env", "init", "work_dir", "privileged", "netns"} {
-		if _, ok := body[k]; ok {
-			t.Errorf("body has %q: %s", k, b)
-		}
+	var keys []string
+	for k := range body {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	wantKeys := []string{"cap_drop", "command", "image", "image_volume_mode", "labels", "name",
+		"no_new_privileges", "pod", "read_only_filesystem", "resource_limits", "user"}
+	if !reflect.DeepEqual(keys, wantKeys) {
+		t.Errorf("body keys %v, want %v: %s", keys, wantKeys, b)
 	}
 	if _, err := ServiceSpec(p, sb, redisBlock(t), "7.1"); err == nil {
 		t.Error("ServiceSpec accepted a tag below the minimum")
