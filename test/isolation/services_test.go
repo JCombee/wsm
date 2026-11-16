@@ -325,7 +325,7 @@ func TestBlockCeilingRejectsBadInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{
-		{"redis", "--tag", tagOld},
+		{"nosuchblock", "--tag", tagOld},
 		{"mariadb", "--tag", tagOld, "--profile", "prod"},
 		{"mariadb", "--tag", "latest"},
 		{"mariadb", "--tag", "11"},

@@ -1,5 +1,6 @@
 // Package blocks is the catalog of building blocks a project can enable:
-// shared services such as MariaDB (ADR 0013). The catalog is Go code, not
+// shared services such as MariaDB (ADR 0013) and per-sandbox services such
+// as Redis (ADR 0015). The catalog is Go code, not
 // a file an agent or user could edit; projects only choose a profile and
 // tags (versions) within it.
 //
@@ -33,6 +34,8 @@ type Block struct {
 	ContainerPort int
 	// Profiles are the allowed profiles; the first one is the default.
 	Profiles []string
+	// MinTag is the oldest version a ceiling may list, as MAJOR.MINOR.
+	MinTag string
 }
 
 // DefaultProfile returns the block's default profile.
@@ -59,6 +62,15 @@ var catalog = []Block{
 		Image:         "docker.io/library/mariadb",
 		ContainerPort: 3306,
 		Profiles:      []string{"dev"},
+		MinTag:        "10.11",
+	},
+	{
+		ID:            "redis",
+		Kind:          KindPerSandbox,
+		Image:         "docker.io/library/redis",
+		ContainerPort: 6379,
+		Profiles:      []string{"dev"},
+		MinTag:        "7.2",
 	},
 }
 
@@ -99,36 +111,53 @@ func LookupShared(id string) (Block, error) {
 const (
 	// MaxTags is the most tags a project ceiling may list per block.
 	MaxTags = 8
-	// minMajor and minMinor give the oldest accepted version, 10.11.
-	minMajor = 10
-	minMinor = 11
 	// maxTagLen is the longest possible valid tag: "999.999.999".
 	maxTagLen = 11
 )
 
-// ValidTag checks that tag is MAJOR.MINOR or MAJOR.MINOR.PATCH: decimal
-// numbers without leading zeros, at most three digits each, and at least
-// 10.11. There is no "latest" and no suffix.
-func ValidTag(tag string) error {
+// ValidTagFormat checks that tag is MAJOR.MINOR or MAJOR.MINOR.PATCH:
+// decimal numbers without leading zeros, at most three digits each. There
+// is no "latest" and no suffix. It does not check a block's minimum; use
+// Block.ValidTag for that.
+func ValidTagFormat(tag string) error {
+	_, err := parseTag(tag)
+	return err
+}
+
+// ValidTag checks the format of tag and that it is at least b.MinTag.
+func (b Block) ValidTag(tag string) error {
+	nums, err := parseTag(tag)
+	if err != nil {
+		return err
+	}
+	min, err := parseTag(b.MinTag)
+	if err != nil {
+		return fmt.Errorf("block %s: bad minimum tag: %w", b.ID, err)
+	}
+	if nums[0] < min[0] || (nums[0] == min[0] && nums[1] < min[1]) {
+		return fmt.Errorf("tag %q: the oldest supported version of %s is %s", tag, b.ID, b.MinTag)
+	}
+	return nil
+}
+
+// parseTag parses a tag in the format ValidTagFormat describes.
+func parseTag(tag string) ([]int, error) {
 	if len(tag) == 0 || len(tag) > maxTagLen {
-		return fmt.Errorf("tag %q: use MAJOR.MINOR or MAJOR.MINOR.PATCH", tag)
+		return nil, fmt.Errorf("tag %q: use MAJOR.MINOR or MAJOR.MINOR.PATCH", tag)
 	}
 	parts := strings.Split(tag, ".")
 	if len(parts) != 2 && len(parts) != 3 {
-		return fmt.Errorf("tag %q: use MAJOR.MINOR or MAJOR.MINOR.PATCH", tag)
+		return nil, fmt.Errorf("tag %q: use MAJOR.MINOR or MAJOR.MINOR.PATCH", tag)
 	}
 	nums := make([]int, len(parts))
 	for i, p := range parts {
 		n, ok := number(p)
 		if !ok {
-			return fmt.Errorf("tag %q: use MAJOR.MINOR or MAJOR.MINOR.PATCH with numbers of 1-3 digits and no leading zeros", tag)
+			return nil, fmt.Errorf("tag %q: use MAJOR.MINOR or MAJOR.MINOR.PATCH with numbers of 1-3 digits and no leading zeros", tag)
 		}
 		nums[i] = n
 	}
-	if nums[0] < minMajor || (nums[0] == minMajor && nums[1] < minMinor) {
-		return fmt.Errorf("tag %q: the oldest supported version is %d.%d", tag, minMajor, minMinor)
-	}
-	return nil
+	return nums, nil
 }
 
 // number parses a decimal number of 1-3 ASCII digits without a leading zero.
@@ -171,7 +200,7 @@ func ValidateCeiling(blockID, profile string, tags []string) (string, error) {
 	}
 	seen := make(map[string]bool, len(tags))
 	for _, t := range tags {
-		if err := ValidTag(t); err != nil {
+		if err := b.ValidTag(t); err != nil {
 			return "", err
 		}
 		if seen[t] {

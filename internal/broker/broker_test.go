@@ -380,7 +380,7 @@ func TestEnsureInstances(t *testing.T) {
 		tags                 []string
 		want                 error
 	}{
-		{"a", "redis", "", []string{"11.8"}, ErrInvalid},
+		{"a", "nosuchblock", "", []string{"11.8"}, ErrInvalid},
 		{"a", "mariadb", "prod", []string{"11.8"}, ErrInvalid},
 		{"a", "mariadb", "", []string{"latest"}, ErrInvalid},
 		{"a", "mariadb", "", nil, ErrInvalid},

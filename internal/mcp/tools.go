@@ -225,7 +225,7 @@ func decodeEnableArgs(raw json.RawMessage) (enableArgs, string) {
 		return enableArgs{}, "invalid block name"
 	}
 	if _, ok := fields["tag"]; ok {
-		if err := blocks.ValidTag(a.Tag); err != nil {
+		if err := blocks.ValidTagFormat(a.Tag); err != nil {
 			return enableArgs{}, "invalid tag"
 		}
 	}

@@ -782,7 +782,7 @@ func TestServiceEnableDenied(t *testing.T) {
 	}{
 		{"project without ceiling", e.b, `{"block":"mariadb"}`},
 		{"tag outside ceiling", e.a, `{"block":"mariadb","tag":"11.4"}`},
-		{"unknown block", e.a, `{"block":"redis"}`},
+		{"unknown block", e.a, `{"block":"nosuchblock"}`},
 		{"extra project field", e.a, `{"block":"mariadb","project":"proj-b"}`},
 		{"extra sandbox field", e.a, `{"block":"mariadb","sandbox":"` + e.b.id + `"}`},
 		{"Block in capitals", e.a, `{"Block":"mariadb"}`},

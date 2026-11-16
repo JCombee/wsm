@@ -143,13 +143,19 @@ func (r Request) Validate() error {
 	if r.UID != nil && !projectuid.Valid(*r.UID) {
 		return fmt.Errorf("%s: uid %d is outside %d-%d", r.Type, *r.UID, projectuid.Min, projectuid.Max)
 	}
+	var blk blocks.Block
 	if r.Service != "" {
-		if _, err := blocks.LookupShared(r.Service); err != nil {
+		b, err := blocks.LookupShared(r.Service)
+		if err != nil {
 			return fmt.Errorf("%s: %w", r.Type, err)
 		}
+		blk = b
 	}
 	if r.Tag != "" {
-		if err := blocks.ValidTag(r.Tag); err != nil {
+		if blk.ID == "" {
+			return fmt.Errorf("%s: a tag needs a service", r.Type)
+		}
+		if err := blk.ValidTag(r.Tag); err != nil {
 			return fmt.Errorf("%s: %w", r.Type, err)
 		}
 	}

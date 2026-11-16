@@ -58,7 +58,7 @@ func ServiceUnit(wsm0 netip.Addr, service, tag string, port int) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if err := blocks.ValidTag(tag); err != nil {
+	if err := b.ValidTag(tag); err != nil {
 		return "", err
 	}
 	if !netpolicy.ValidServicePort(port) {
@@ -158,7 +158,7 @@ func checkService(service, tag string) (blocks.Block, error) {
 	if err != nil {
 		return b, err
 	}
-	return b, blocks.ValidTag(tag)
+	return b, b.ValidTag(tag)
 }
 
 // podman runs podman for the service user: svcPodman, or the fake of a

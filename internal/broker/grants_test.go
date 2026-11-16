@@ -244,7 +244,7 @@ func TestEnableWithinCeiling(t *testing.T) {
 	for _, tt := range []struct {
 		name, sandbox, block, tag string
 	}{
-		{"unknown block", sa.ID, "redis", ""},
+		{"unknown block", sa.ID, "nosuchblock", ""},
 		{"no such block", sa.ID, "postgres", ""},
 		{"tag outside ceiling", sa.ID, "mariadb", "11.4"},
 		{"project without ceiling", sbB.ID, "mariadb", ""},
