@@ -35,6 +35,8 @@ var ErrInvalid = db.ErrInvalid
 type Helper interface {
 	PullServiceImage(ctx context.Context, service, tag string) error
 	EnsureServiceInstance(ctx context.Context, service, tag string, port int, password string) error
+	AllowService(ctx context.Context, uid, port int) error
+	RevokeService(ctx context.Context, uid, port int) error
 }
 
 // Service states.
@@ -79,11 +81,21 @@ type Broker struct {
 	// PollInterval is the pause between readiness checks; zero means one
 	// second.
 	PollInterval time.Duration
-	Logf         func(format string, args ...any)
+	// SQL opens a root session on the instance on port. Nil uses
+	// go-sql-driver/mysql on Addr:port.
+	SQL func(ctx context.Context, port int, password string) (SQLConn, error)
+	// GrantWait bounds how long Enable waits for a root login; zero means
+	// 60 seconds.
+	GrantWait time.Duration
+	Logf      func(format string, args ...any)
 
 	// mu serializes SetBlock, RemoveBlock and EnsureAll. It is separate
 	// from the sandbox manager's lock, because a pull can take minutes.
 	mu sync.Mutex
+	// grantMu serializes grants, revocations and the ceiling checks that
+	// depend on them. It is separate from mu, so service_enable does not
+	// wait for a pull; whoever needs both takes mu first.
+	grantMu sync.Mutex
 }
 
 func (b *Broker) logf(format string, args ...any) {
@@ -141,6 +153,10 @@ func (b *Broker) SetBlock(ctx context.Context, projectSlug, blockID, profile str
 	if err != nil {
 		return Ceiling{}, err
 	}
+	// Fail early, before any pull; checked again below under grantMu.
+	if err := b.checkCeilingKeepsGrants(ctx, p, blockID, tags); err != nil {
+		return Ceiling{}, err
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -165,6 +181,11 @@ func (b *Broker) SetBlock(ctx context.Context, projectSlug, blockID, profile str
 	cfg, err := json.Marshal(config{Tags: tags})
 	if err != nil {
 		return Ceiling{}, fmt.Errorf("set block: %w", err)
+	}
+	b.grantMu.Lock()
+	defer b.grantMu.Unlock()
+	if err := b.checkCeilingKeepsGrants(ctx, p, blockID, tags); err != nil {
+		return Ceiling{}, err
 	}
 	if err := b.Store.SetProjectBlock(ctx, db.ProjectBlock{ProjectID: p.ID, BlockID: blockID,
 		Profile: profile, ConfigJSON: string(cfg)}); err != nil {
@@ -276,7 +297,8 @@ func (b *Broker) address(port int) string {
 }
 
 // RemoveBlock removes the ceiling of a project for a block. The instances
-// stay: other projects may use them.
+// stay: other projects may use them. While sandboxes of the project have
+// a grant on the block, it fails with ErrConflict.
 func (b *Broker) RemoveBlock(ctx context.Context, projectSlug, blockID string) error {
 	p, err := b.Store.ProjectBySlug(ctx, projectSlug)
 	if err != nil {
@@ -284,6 +306,11 @@ func (b *Broker) RemoveBlock(ctx context.Context, projectSlug, blockID string) e
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.grantMu.Lock()
+	defer b.grantMu.Unlock()
+	if err := b.checkCeilingKeepsGrants(ctx, p, blockID, nil); err != nil {
+		return err
+	}
 	if err := b.Store.DeleteProjectBlock(ctx, p.ID, blockID); err != nil {
 		return err
 	}

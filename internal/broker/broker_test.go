@@ -29,6 +29,11 @@ type fakeHelper struct {
 	failEnsure map[string]bool
 	neverReady map[string]bool
 	ready      map[int]string // port -> server version
+	// events is the ordered log of AllowService, RevokeService and the
+	// statements of fakeSQL.
+	events     []string
+	failAllow  bool
+	failRevoke bool
 }
 
 func newFakeHelper() *fakeHelper {
@@ -61,6 +66,41 @@ func (f *fakeHelper) EnsureServiceInstance(_ context.Context, service, tag strin
 		f.ready[port] = tag + ".9-MariaDB-ubu2404"
 	}
 	return nil
+}
+
+func (f *fakeHelper) AllowService(_ context.Context, uid, port int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failAllow {
+		return errors.New("nft failed")
+	}
+	f.events = append(f.events, fmt.Sprintf("allow %d %d", uid, port))
+	return nil
+}
+
+func (f *fakeHelper) RevokeService(_ context.Context, uid, port int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failRevoke {
+		return errors.New("nft failed")
+	}
+	f.events = append(f.events, fmt.Sprintf("revoke %d %d", uid, port))
+	return nil
+}
+
+func (f *fakeHelper) event(e string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.events = append(f.events, e)
+}
+
+// takeEvents returns the events so far and clears them.
+func (f *fakeHelper) takeEvents() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := f.events
+	f.events = nil
+	return out
 }
 
 func (f *fakeHelper) set(m map[string]bool, tag string, v bool) {

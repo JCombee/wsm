@@ -145,12 +145,15 @@ func TestGrantsStore(t *testing.T) {
 	if err := s.ClearMCPToken(ctx, a1.ID); err != nil {
 		t.Errorf("second ClearMCPToken: %v", err)
 	}
-	sb, err := s.SandboxBySlug(ctx, pa.ID, "one")
+	sb, err := s.SandboxByID(ctx, a1.ID)
 	if err != nil || sb.MCPTokenHash != "" {
 		t.Errorf("after ClearMCPToken: hash %q, %v", sb.MCPTokenHash, err)
 	}
 	if _, _, err := s.SandboxByTokenHash(ctx, hashOf("tok-one")); !errors.Is(err, ErrNotFound) {
 		t.Errorf("old token still works: %v", err)
+	}
+	if _, err := s.SandboxByID(ctx, "nosuchsandbx"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("SandboxByID unknown: err = %v, want ErrNotFound", err)
 	}
 	if err := s.ClearMCPToken(ctx, "nosuchsandbx"); !errors.Is(err, ErrNotFound) {
 		t.Errorf("unknown sandbox: err = %v, want ErrNotFound", err)

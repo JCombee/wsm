@@ -153,7 +153,7 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 		status = http.StatusBadRequest
 	case errors.Is(err, db.ErrNotFound):
 		status = http.StatusNotFound
-	case errors.Is(err, db.ErrConflict), errors.Is(err, sandbox.ErrState):
+	case errors.Is(err, db.ErrConflict), errors.Is(err, sandbox.ErrState), errors.Is(err, broker.ErrConflict):
 		status = http.StatusConflict
 	}
 	s.logf("%s %s: %d: %v", r.Method, r.URL.Path, status, err)

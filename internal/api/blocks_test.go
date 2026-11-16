@@ -49,6 +49,9 @@ func (f *fakeServices) EnsureServiceInstance(_ context.Context, _, tag string, p
 	return nil
 }
 
+func (f *fakeServices) AllowService(context.Context, int, int) error  { return nil }
+func (f *fakeServices) RevokeService(context.Context, int, int) error { return nil }
+
 func (f *fakeServices) dial(_ context.Context, port int) (net.Conn, error) {
 	f.mu.Lock()
 	v, ok := f.ready[port]

@@ -392,6 +392,17 @@ func (s *Store) SandboxBySlug(ctx context.Context, projectID, slug string) (Sand
 	return sb, nil
 }
 
+// SandboxByID returns the sandbox with id.
+func (s *Store) SandboxByID(ctx context.Context, id string) (Sandbox, error) {
+	row := s.DB.QueryRowContext(ctx, `SELECT `+sandboxColumns+`
+		FROM sandboxes WHERE id = ?`, id)
+	sb, err := scanSandbox(row)
+	if err != nil {
+		return sb, fmt.Errorf("sandbox %s: %w", id, err)
+	}
+	return sb, nil
+}
+
 // SandboxByTokenHash returns the sandbox whose MCP token has the given
 // hash, and its project. An empty hash never matches.
 func (s *Store) SandboxByTokenHash(ctx context.Context, hash string) (Project, Sandbox, error) {
