@@ -67,6 +67,9 @@ type SystemOps struct {
 	MCPPort uint16
 	// Logf receives progress messages; it may be nil.
 	Logf func(format string, args ...any)
+
+	// runPodman replaces the podman runner of the service user in tests.
+	runPodman func(ctx context.Context, a account, stdin *strings.Reader, args ...string) (string, error)
 }
 
 func (o *SystemOps) logf(format string, args ...any) {

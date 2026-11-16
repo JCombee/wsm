@@ -23,6 +23,7 @@ import (
 
 	"github.com/JCombee/wsm/internal/blocks"
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/helper"
 	"github.com/JCombee/wsm/internal/secret"
 )
 
@@ -184,6 +185,9 @@ func (b *Broker) instanceFor(ctx context.Context, blk blocks.Block, tag string) 
 		return instance{}, err
 	}
 	if err := b.Helper.PullServiceImage(ctx, blk.ID, tag); err != nil {
+		if errors.Is(err, helper.ErrNotFound) {
+			return instance{}, fmt.Errorf("%w: tag %s of block %s does not exist", ErrInvalid, tag, blk.ID)
+		}
 		return instance{}, fmt.Errorf("pull %s %s: %w", blk.ID, tag, err)
 	}
 	pw, err := newPassword()

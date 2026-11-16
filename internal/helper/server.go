@@ -135,7 +135,11 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 	err = s.do(ctx, req)
 	if err != nil {
 		s.logf("%s %s: failed: %v", req.Type, describe(req), err)
-		writeResponse(conn, Response{Error: err.Error()})
+		resp := Response{Error: err.Error()}
+		if errors.Is(err, ErrNotFound) {
+			resp.Code = CodeNotFound
+		}
+		writeResponse(conn, resp)
 		return
 	}
 	s.logf("%s %s: ok", req.Type, describe(req))

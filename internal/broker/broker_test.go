@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/helper"
 	"github.com/JCombee/wsm/internal/secret"
 )
 
@@ -40,7 +41,10 @@ func (f *fakeHelper) PullServiceImage(_ context.Context, service, tag string) er
 	defer f.mu.Unlock()
 	f.pulls = append(f.pulls, service+" "+tag)
 	if f.failPull[tag] {
-		return errors.New("manifest unknown")
+		return errors.New("toomanyrequests")
+	}
+	if tag == "97.9" {
+		return fmt.Errorf("helper pull_service_image: %w: manifest unknown", helper.ErrNotFound)
 	}
 	return nil
 }
@@ -175,6 +179,27 @@ func (e *testEnv) ceiling(t *testing.T, slug string) string {
 		t.Fatal(err)
 	}
 	return fmt.Sprint(cs)
+}
+
+// TestUnknownTagIsInvalid: a tag the registry does not know is invalid
+// input and leaves no instance row; another pull error is not.
+func TestUnknownTagIsInvalid(t *testing.T) {
+	ctx := context.Background()
+	e := newEnv(t)
+	_, err := e.b.SetBlock(ctx, "a", "mariadb", "", []string{"97.9"})
+	if !errors.Is(err, ErrInvalid) || !strings.Contains(err.Error(), "tag 97.9 of block mariadb does not exist") {
+		t.Errorf("unknown tag: err = %v, want ErrInvalid with the tag", err)
+	}
+	if _, err := e.s.ServiceInstance(ctx, "mariadb", "97.9"); !errors.Is(err, db.ErrNotFound) {
+		t.Errorf("row for 97.9: %v", err)
+	}
+	e.h.set(e.h.failPull, "11.8", true)
+	if _, err := e.b.SetBlock(ctx, "a", "mariadb", "", []string{"11.8"}); err == nil || errors.Is(err, ErrInvalid) {
+		t.Errorf("other pull error: err = %v, want a non-invalid error", err)
+	}
+	if insts, _ := e.s.ServiceInstances(ctx); len(insts) != 0 {
+		t.Errorf("instances after failed pulls: %+v", insts)
+	}
 }
 
 func TestEnsureInstances(t *testing.T) {

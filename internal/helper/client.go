@@ -66,6 +66,9 @@ func exchange(ctx context.Context, uc *net.UnixConn, req Request, data []byte) e
 		if resp.Error == "" {
 			resp.Error = "failed"
 		}
+		if resp.Code == CodeNotFound {
+			return fmt.Errorf("helper %s: %w: %s", req.Type, ErrNotFound, resp.Error)
+		}
 		return fmt.Errorf("helper %s: %w", req.Type, errors.New(resp.Error))
 	}
 	return nil

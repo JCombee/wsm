@@ -71,7 +71,17 @@ type Request struct {
 type Response struct {
 	OK    bool   `json:"ok"`
 	Error string `json:"error,omitempty"`
+	// Code classifies some errors; see CodeNotFound.
+	Code string `json:"code,omitempty"`
 }
+
+// CodeNotFound is the response code when the thing asked for does not
+// exist, for example an image tag the registry does not know.
+const CodeNotFound = "not_found"
+
+// ErrNotFound is the error for a response with CodeNotFound. Ops return it
+// (wrapped) to make the server answer with that code.
+var ErrNotFound = errors.New("not found")
 
 // UserName returns the Linux user name for a project UID. The name is only
 // ever derived from the UID, never taken from input.

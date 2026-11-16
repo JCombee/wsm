@@ -161,14 +161,27 @@ func checkService(service, tag string) (blocks.Block, error) {
 	return b, blocks.ValidTag(tag)
 }
 
-// pullImage pulls the image for tag unless the service user has it.
+// podman runs podman for the service user: svcPodman, or the fake of a
+// test.
+func (o *SystemOps) podman(ctx context.Context, a account, stdin *strings.Reader, args ...string) (string, error) {
+	if o.runPodman != nil {
+		return o.runPodman(ctx, a, stdin, args...)
+	}
+	return svcPodman(ctx, a, stdin, args...)
+}
+
+// pullImage pulls the image for tag unless the service user has it. When
+// the registry does not know the tag, the error wraps ErrNotFound.
 func (o *SystemOps) pullImage(ctx context.Context, a account, b blocks.Block, tag string) error {
 	image := b.ImageRef(tag)
-	if _, err := svcPodman(ctx, a, nil, "image", "exists", image); err == nil {
+	if _, err := o.podman(ctx, a, nil, "image", "exists", image); err == nil {
 		return nil
 	}
 	o.logf("pulling %s", image)
-	if _, err := svcPodman(ctx, a, nil, "pull", "-q", image); err != nil {
+	if out, err := o.podman(ctx, a, nil, "pull", "-q", image); err != nil {
+		if strings.Contains(out, "manifest unknown") || strings.Contains(err.Error(), "manifest unknown") {
+			return fmt.Errorf("%w: tag %s of %s: %v", ErrNotFound, tag, b.ID, err)
+		}
 		return err
 	}
 	return nil
@@ -212,7 +225,7 @@ func (o *SystemOps) EnsureServiceInstance(ctx context.Context, service, tag stri
 		return err
 	}
 	n := NamesFor(service, tag)
-	if _, err := svcPodman(ctx, a, strings.NewReader(password),
+	if _, err := o.podman(ctx, a, strings.NewReader(password),
 		"secret", "create", "--replace", n.Secret, "-"); err != nil {
 		return err
 	}

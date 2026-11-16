@@ -17,6 +17,7 @@ import (
 
 	"github.com/JCombee/wsm/internal/broker"
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/helper"
 	"github.com/JCombee/wsm/internal/podman"
 	"github.com/JCombee/wsm/internal/podman/podmantest"
 	"github.com/JCombee/wsm/internal/sandbox"
@@ -31,8 +32,11 @@ type fakeServices struct {
 }
 
 func (f *fakeServices) PullServiceImage(_ context.Context, _, tag string) error {
-	if tag == "99.9" {
-		return errors.New("manifest unknown")
+	switch tag {
+	case "99.9":
+		return fmt.Errorf("helper pull_service_image: %w: manifest unknown", helper.ErrNotFound)
+	case "98.9":
+		return errors.New("toomanyrequests")
 	}
 	return nil
 }
@@ -157,7 +161,8 @@ func TestBlocksAPI(t *testing.T) {
 		{"no tags", "PUT", "/v1/projects/app/blocks/mariadb", `{"tags":[]}`, 400},
 		{"unknown field", "PUT", "/v1/projects/app/blocks/mariadb", `{"tags":["11.8"],"image":"evil"}`, 400},
 		{"too large", "PUT", "/v1/projects/app/blocks/mariadb", `{"tags":["11.8"],"profile":"` + strings.Repeat("a", maxBlockBody) + `"}`, 400},
-		{"tag that does not exist", "PUT", "/v1/projects/app/blocks/mariadb", `{"tags":["99.9"]}`, 500},
+		{"tag that does not exist", "PUT", "/v1/projects/app/blocks/mariadb", `{"tags":["99.9"]}`, 400},
+		{"pull fails otherwise", "PUT", "/v1/projects/app/blocks/mariadb", `{"tags":["98.9"]}`, 500},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if code, body := call(tt.method, tt.path, tt.body); code != tt.want {
@@ -167,6 +172,13 @@ func TestBlocksAPI(t *testing.T) {
 	}
 	if bs, _ := c.Blocks(ctx, "app"); len(bs) != 0 {
 		t.Errorf("a rejected PUT changed the ceiling: %+v", bs)
+	}
+	if code, body := call(http.MethodPut, "/v1/projects/app/blocks/mariadb", `{"tags":["99.9"]}`); code != 400 ||
+		!strings.Contains(body, "tag 99.9 of block mariadb does not exist") {
+		t.Errorf("unknown tag: %d %s", code, body)
+	}
+	if svcs, err := c.Services(ctx); err != nil || len(svcs) != 2 {
+		t.Errorf("an unknown tag left an instance: %+v, %v", svcs, err)
 	}
 
 	// No response carries a secret.
