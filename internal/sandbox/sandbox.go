@@ -123,9 +123,17 @@ type Manager struct {
 	Secrets *secret.Box
 	// Mirrors holds the git mirrors of projects with a repository.
 	Mirrors Mirrors
-	Logf    func(format string, args ...any)
+	// Grants revokes a sandbox's service grants when it is deleted
+	// (CLAUDE.md invariant 7). Nil means there are none.
+	Grants Grants
+	Logf   func(format string, args ...any)
 
 	mu sync.Mutex
+}
+
+// Grants is the part of the broker that revokes service grants.
+type Grants interface {
+	RevokeSandbox(ctx context.Context, sandboxID string) error
 }
 
 func (m *Manager) logf(format string, args ...any) {
@@ -330,10 +338,17 @@ func (m *Manager) DeleteProject(ctx context.Context, slug string) error {
 		pc := m.Podman(p.LinuxUID)
 		defer pc.Close()
 		// Podman errors are logged, not fatal: deleting the user below
-		// resets the user's Podman and removes its storage anyway.
+		// resets the user's Podman and removes its storage anyway. A
+		// failed revocation stops the delete before the user goes.
 		for _, sb := range sbs {
+			if err := m.Store.ClearMCPToken(ctx, sb.ID); err != nil {
+				return fmt.Errorf("delete project %s: %w", p.Slug, err)
+			}
 			if err := m.removePodman(ctx, pc, sb); err != nil {
 				m.logf("delete project %s: sandbox %s: %v", p.Slug, sb.Slug, err)
+			}
+			if err := m.revokeGrants(ctx, sb); err != nil {
+				return fmt.Errorf("delete project %s: %w", p.Slug, err)
 			}
 		}
 		if err := pc.VolumeRemove(ctx, HomeVolume(p.ID)); err != nil {
@@ -592,6 +607,17 @@ func (m *Manager) removePodman(ctx context.Context, pc *podman.Client, sb db.San
 	return pc.VolumeRemove(ctx, CodeVolume(sb.ID))
 }
 
+// revokeGrants revokes the service grants of a sandbox.
+func (m *Manager) revokeGrants(ctx context.Context, sb db.Sandbox) error {
+	if m.Grants == nil {
+		return nil
+	}
+	if err := m.Grants.RevokeSandbox(ctx, sb.ID); err != nil {
+		return fmt.Errorf("sandbox %s: revoke service grants: %w", sb.Slug, err)
+	}
+	return nil
+}
+
 // StartSandbox starts a sandbox's pod. The first start of a sandbox in a
 // project with a repository also seeds its code (ADR 0010).
 func (m *Manager) StartSandbox(ctx context.Context, projectSlug, slug string) error {
@@ -650,8 +676,10 @@ func (m *Manager) StopSandbox(ctx context.Context, projectSlug, slug string) err
 	return m.Store.SetSandboxStatus(ctx, sb.ID, db.StatusStopped)
 }
 
-// DeleteSandbox removes a sandbox's pod, its code volume and its row. The
-// project's home volume stays.
+// DeleteSandbox deletes a sandbox: first its MCP token, so no new MCP
+// call gets in, then its pod and code volume, then its service grants,
+// then its row. The project's home volume stays. When revoking fails, the
+// row stays and a next delete continues.
 func (m *Manager) DeleteSandbox(ctx context.Context, projectSlug, slug string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -662,7 +690,13 @@ func (m *Manager) DeleteSandbox(ctx context.Context, projectSlug, slug string) e
 	pc := m.Podman(p.LinuxUID)
 	defer pc.Close()
 	err = m.job(ctx, "sandbox.delete", sb.ID, func() error {
-		return m.removePodman(ctx, pc, sb)
+		if err := m.Store.ClearMCPToken(ctx, sb.ID); err != nil {
+			return err
+		}
+		if err := m.removePodman(ctx, pc, sb); err != nil {
+			return err
+		}
+		return m.revokeGrants(ctx, sb)
 	})
 	if err != nil {
 		return err

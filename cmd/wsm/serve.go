@@ -90,6 +90,15 @@ func runServe(e env) error {
 		Addr:    netip.MustParseAddr(netpolicy.DefaultWSM0Addr),
 		Logf:    logger.Printf,
 	}
+	mgr.Grants = brk
+	// ApplyBaseRules emptied svc_allow4: put the elements of the existing
+	// grants back before the API and the MCP open. Failures are logged and
+	// not fatal; access then stays closed (ADR 0014).
+	if n, err := brk.RestoreGrants(ctx); err != nil {
+		logger.Printf("restore service grants: %v", err)
+	} else if n > 0 {
+		logger.Printf("restore service grants: %d failed", n)
+	}
 	// Bring every shared service instance back in line with its template,
 	// in the background: the API and the MCP do not wait for it (ADR 0013).
 	go brk.EnsureAll(ctx)
