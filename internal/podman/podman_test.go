@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -199,6 +200,66 @@ func TestRemoveNotFoundIsNoError(t *testing.T) {
 	}
 	if ok, err := c.ImageExists(ctx, "img"); ok || err != nil {
 		t.Errorf("ImageExists = %v, %v", ok, err)
+	}
+	if err := c.ContainerRemove(ctx, "sbx-x-redis"); err != nil {
+		t.Errorf("ContainerRemove: %v", err)
+	}
+	if _, err := c.ContainerInspect(ctx, "sbx-x-redis"); !IsNotFound(err) {
+		t.Errorf("ContainerInspect of a missing container: %v", err)
+	}
+}
+
+func TestContainerCalls(t *testing.T) {
+	var reqs []string
+	c := fakeServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := strings.TrimPrefix(r.URL.Path, "/"+apiVersion+"/libpod")
+		reqs = append(reqs, r.Method+" "+path+" "+r.URL.RawQuery)
+		switch {
+		case path == "/containers/up/start":
+			w.WriteHeader(http.StatusNotModified)
+		case path == "/containers/down/start":
+			w.WriteHeader(http.StatusNoContent)
+		case path == "/containers/bad/start":
+			w.WriteHeader(http.StatusInternalServerError)
+			io.WriteString(w, `{"message":"cannot start"}`)
+		case path == "/containers/up" && r.Method == http.MethodDelete:
+			io.WriteString(w, `[{"Id":"abc"}]`)
+		case path == "/containers/up/json":
+			io.WriteString(w, `{"Id":"abc","State":{"Running":true,"Status":"running"},"Config":{"Labels":{"wsm.tag":"8.10"}},"Other":1}`)
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			io.WriteString(w, `{"message":"unexpected"}`)
+		}
+	}))
+	ctx := context.Background()
+	if err := c.ContainerStart(ctx, "up"); err != nil {
+		t.Errorf("start of a running container: %v", err)
+	}
+	if err := c.ContainerStart(ctx, "down"); err != nil {
+		t.Errorf("start: %v", err)
+	}
+	if err := c.ContainerStart(ctx, "bad"); err == nil || !strings.Contains(err.Error(), "cannot start") {
+		t.Errorf("failed start: %v", err)
+	}
+	if err := c.ContainerRemove(ctx, "up"); err != nil {
+		t.Errorf("remove: %v", err)
+	}
+	st, err := c.ContainerInspect(ctx, "up")
+	if err != nil || st.ID != "abc" || !st.Running || st.Labels["wsm.tag"] != "8.10" {
+		t.Errorf("inspect = %+v, %v", st, err)
+	}
+	if !slices.Contains(reqs, "DELETE /containers/up force=true") {
+		t.Errorf("requests %v lack a forced remove", reqs)
+	}
+}
+
+func TestContainerSpecReadOnly(t *testing.T) {
+	b, err := json.Marshal(ContainerSpec{Name: "n", Image: "i", ReadOnlyFilesystem: true, ImageVolumeMode: "tmpfs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := `{"name":"n","image":"i","read_only_filesystem":true,"image_volume_mode":"tmpfs"}`; string(b) != want {
+		t.Errorf("spec = %s, want %s", b, want)
 	}
 }
 

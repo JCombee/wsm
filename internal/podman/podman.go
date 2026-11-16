@@ -246,6 +246,11 @@ type ContainerSpec struct {
 	NoNewPrivileges bool              `json:"no_new_privileges,omitempty"`
 	Resources       *Resources        `json:"resource_limits,omitempty"`
 	Volumes         []NamedVolume     `json:"volumes,omitempty"`
+	// ReadOnlyFilesystem mounts the container's root filesystem read-only.
+	ReadOnlyFilesystem bool `json:"read_only_filesystem,omitempty"`
+	// ImageVolumeMode says what to do with the VOLUME entries of the
+	// image; "tmpfs" turns them into tmpfs mounts, so no volume is created.
+	ImageVolumeMode string `json:"image_volume_mode,omitempty"`
 }
 
 type idResponse struct {
@@ -308,6 +313,48 @@ func (c *Client) ContainerCreate(ctx context.Context, spec ContainerSpec) (strin
 		return "", err
 	}
 	return r.ID, nil
+}
+
+// ContainerStart starts a container. A running container (304) is not an
+// error.
+func (c *Client) ContainerStart(ctx context.Context, name string) error {
+	return c.do(ctx, http.MethodPost, "/containers/"+url.PathEscape(name)+"/start", nil, nil, nil)
+}
+
+// ContainerRemove force-removes a container, stopping it first if it runs.
+// A missing container is not an error.
+func (c *Client) ContainerRemove(ctx context.Context, name string) error {
+	q := url.Values{"force": {"true"}}
+	err := c.do(ctx, http.MethodDelete, "/containers/"+url.PathEscape(name), q, nil, nil)
+	if IsNotFound(err) {
+		return nil
+	}
+	return err
+}
+
+// ContainerState is the subset of container inspect output wsm reads.
+type ContainerState struct {
+	ID      string
+	Running bool
+	Labels  map[string]string
+}
+
+// ContainerInspect returns the state of a container. A missing container
+// gives an error for which IsNotFound is true.
+func (c *Client) ContainerInspect(ctx context.Context, name string) (ContainerState, error) {
+	var r struct {
+		ID    string `json:"Id"`
+		State struct {
+			Running bool `json:"Running"`
+		} `json:"State"`
+		Config struct {
+			Labels map[string]string `json:"Labels"`
+		} `json:"Config"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/containers/"+url.PathEscape(name)+"/json", nil, nil, &r); err != nil {
+		return ContainerState{}, err
+	}
+	return ContainerState{ID: r.ID, Running: r.State.Running, Labels: r.Config.Labels}, nil
 }
 
 // VolumeCreate creates a named volume. An existing volume is not an error.
