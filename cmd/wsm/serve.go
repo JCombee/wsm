@@ -103,7 +103,7 @@ func runServe(e env) error {
 	// The MCP server listens only on wsm0, which SetupWSM0 created above
 	// (ADR 0012). Without it there is no MCP, so wsm does not start.
 	mcpSrv := mcp.NewHTTPServer((&mcp.Server{
-		Store: store, Audit: audit.New(sqlDB), Logf: logger.Printf, Version: version,
+		Store: store, Audit: audit.New(sqlDB), Services: brk, Logf: logger.Printf, Version: version,
 	}).Handler(), logger)
 	mcpLn, err := mcp.Listen(ctx)
 	if err != nil {

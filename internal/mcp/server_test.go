@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	sdk "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/JCombee/wsm/internal/audit"
+	"github.com/JCombee/wsm/internal/broker"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/mcptoken"
 )
@@ -516,7 +518,7 @@ func TestToolsTakeNoIdentity(t *testing.T) {
 			if readOnly {
 				t.Error("service_enable has readOnlyHint")
 			}
-			if len(schema.Properties) != 1 || schema.Properties["block"] == nil {
+			if len(schema.Properties) != 2 || schema.Properties["block"] == nil || schema.Properties["tag"] == nil {
 				t.Errorf("service_enable input: %s", b)
 			}
 		}
@@ -577,43 +579,251 @@ func TestSandboxInfoUsesToken(t *testing.T) {
 	}
 }
 
-func TestServiceEnableDenied(t *testing.T) {
-	e := newTestEnv(t)
-	cs := e.connect(e.a)
-	before := e.lastSeq()
-	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "service_enable", Arguments: map[string]any{"block": "mariadb"}})
-	if err != nil {
-		t.Fatal(err)
+// fakeServices is a broker with one ceiling: mariadb on 11.8 and 12.3 for
+// the sandbox in allowed. Block "slow" is unavailable, "boom" fails.
+type fakeServices struct {
+	mu      sync.Mutex
+	allowed string
+	calls   []string // sandbox block tag, per Enable
+	grants  map[string][]broker.Credentials
+}
+
+const fakePassword = "SECRETpw0123456789abcdefghijklmnopqrstuvwxy"
+
+func (f *fakeServices) Enable(_ context.Context, sandboxID, block, tag string) (broker.Credentials, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, sandboxID+" "+block+" "+tag)
+	switch block {
+	case "slow":
+		return broker.Credentials{}, fmt.Errorf("%w: slow 11.8", broker.ErrUnavailable)
+	case "boom":
+		return broker.Credentials{}, errors.New("database is locked")
+	case "mariadb":
+	default:
+		return broker.Credentials{}, fmt.Errorf("%w: unknown block %q", broker.ErrDenied, block)
 	}
-	text := ""
-	if len(res.Content) > 0 {
-		text = res.Content[0].(*sdk.TextContent).Text
+	if sandboxID != f.allowed {
+		return broker.Credentials{}, fmt.Errorf("%w: block mariadb is not allowed for this project", broker.ErrDenied)
 	}
-	if !res.IsError || !strings.HasPrefix(text, "denied:") {
-		t.Errorf("service_enable = isError %v, %q", res.IsError, text)
+	if tag == "" {
+		tag = "11.8"
 	}
-	var found bool
-	for _, ev := range e.eventsAfter(before) {
-		if ev.Tool == "service_enable" {
-			found = true
-			if ev.Result != audit.ResultDenied || ev.Actor != "mcp:"+e.a.id {
-				t.Errorf("event = %+v", ev)
-			}
+	if tag != "11.8" && tag != "12.3" {
+		return broker.Credentials{}, fmt.Errorf("%w: tag %s of block mariadb is not allowed for this project", broker.ErrDenied, tag)
+	}
+	c := broker.Credentials{Block: block, Tag: tag, Host: "10.255.0.1", Port: 20000, User: "sbx_" + sandboxID,
+		Password: fakePassword, Database: "sbx_" + sandboxID + "_app"}
+	if tag == "12.3" {
+		c.Port = 20001
+	}
+	for _, g := range f.grants[sandboxID] {
+		if g.Tag == tag {
+			return g, nil
 		}
 	}
-	if !found {
-		t.Error("no audit event for service_enable")
+	if f.grants == nil {
+		f.grants = map[string][]broker.Credentials{}
+	}
+	f.grants[sandboxID] = append(f.grants[sandboxID], c)
+	return c, nil
+}
+
+func (f *fakeServices) Enabled(_ context.Context, sandboxID string) ([]broker.Enabled, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []broker.Enabled{}
+	for _, g := range f.grants[sandboxID] {
+		out = append(out, broker.Enabled{Block: g.Block, Tag: g.Tag, Host: g.Host, Port: g.Port, User: g.User, Database: g.Database})
+	}
+	return out, nil
+}
+
+func (f *fakeServices) Available(_ context.Context, sandboxID string) ([]broker.Offer, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if sandboxID != f.allowed {
+		return nil, nil
+	}
+	o := broker.Offer{Block: "mariadb", Profile: "dev", Tags: []string{"11.8", "12.3"}, DefaultTag: "11.8"}
+	for _, g := range f.grants[sandboxID] {
+		o.EnabledTags = append(o.EnabledTags, g.Tag)
+	}
+	return []broker.Offer{o}, nil
+}
+
+// callEnable calls service_enable from sb with raw arguments and returns
+// the tool result and the audit event of the call.
+func (e *testEnv) callEnable(sb testSandbox, args string) (toolResult, audit.Record) {
+	e.t.Helper()
+	before := e.lastSeq()
+	code, body := e.post(e.url(sb.id), bearer(sb.token), callBody("service_enable", args))
+	if code != 200 {
+		e.t.Fatalf("service_enable %s: status %d: %s", args, code, body)
+	}
+	tr := parseToolResult(e.t, body)
+	evs := e.eventsAfter(before)
+	if len(evs) != 1 || evs[0].Tool != "service_enable" {
+		e.t.Fatalf("events for one call: %+v", evs)
+	}
+	return tr, evs[0]
+}
+
+func TestServiceEnableTool(t *testing.T) {
+	e := newTestEnv(t)
+	fake := &fakeServices{allowed: e.a.id}
+	e.srv.Services = fake
+
+	tr, ev := e.callEnable(e.a, `{"block":"mariadb"}`)
+	if tr.IsError {
+		t.Fatalf("service_enable failed: %s", tr.text())
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(tr.StructuredContent, &fields); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"block": "mariadb", "tag": "11.8", "host": "10.255.0.1", "port": float64(20000),
+		"user": "sbx_" + e.a.id, "password": fakePassword, "database": "sbx_" + e.a.id + "_app"}
+	if fmt.Sprint(fields) != fmt.Sprint(want) {
+		t.Errorf("structured = %v, want %v", fields, want)
+	}
+	var text map[string]any
+	if err := json.Unmarshal([]byte(tr.text()), &text); err != nil || fmt.Sprint(text) != fmt.Sprint(want) {
+		t.Errorf("text = %s", tr.text())
+	}
+	if ev.Result != audit.ResultOK || ev.Detail != "granted mariadb 11.8" || ev.Actor != "mcp:"+e.a.id {
+		t.Errorf("event = %+v", ev)
+	}
+	if strings.Contains(ev.ArgsJSON, fakePassword) || strings.Contains(ev.Detail, fakePassword) {
+		t.Error("the audit event contains the password")
+	}
+	if fake.calls[0] != e.a.id+" mariadb " {
+		t.Errorf("Enable got %q", fake.calls[0])
 	}
 
-	// The tool's own handler refuses too, without the policy in front.
-	r, err := serviceEnable(context.Background(), &sdk.CallToolRequest{})
+	// With a tag.
+	tr, ev = e.callEnable(e.a, `{"block":"mariadb","tag":"12.3"}`)
+	if tr.IsError || !strings.Contains(tr.text(), `"port":20001`) || ev.Detail != "granted mariadb 12.3" {
+		t.Errorf("12.3: %s, %+v", tr.text(), ev)
+	}
+
+	// Unavailable and internal errors.
+	tr, ev = e.callEnable(e.a, `{"block":"slow"}`)
+	if !tr.IsError || tr.text() != "error: service not available, try again later" || ev.Result != audit.ResultError {
+		t.Errorf("unavailable: %q, %+v", tr.text(), ev)
+	}
+	tr, ev = e.callEnable(e.a, `{"block":"boom"}`)
+	if !tr.IsError || tr.text() != "error: internal error" || ev.Result != audit.ResultError ||
+		strings.Contains(tr.text(), "locked") {
+		t.Errorf("internal: %q, %+v", tr.text(), ev)
+	}
+
+	// sandbox_info and services_available show the grants, no password.
+	cs := e.connect(e.a)
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "sandbox_info"})
+	if err != nil || res.IsError {
+		t.Fatalf("sandbox_info: %v %v", res, err)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	var info SandboxInfo
+	if err := json.Unmarshal(b, &info); err != nil || len(info.Services) != 2 ||
+		info.Services[0] != (ServiceInfo{Block: "mariadb", Tag: "11.8", Host: "10.255.0.1", Port: 20000,
+			User: "sbx_" + e.a.id, Database: "sbx_" + e.a.id + "_app"}) || info.Services[1].Port != 20001 {
+		t.Errorf("sandbox_info = %s", b)
+	}
+	res2, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "services_available"})
+	if err != nil || res2.IsError {
+		t.Fatalf("services_available: %v %v", res2, err)
+	}
+	b2, _ := json.Marshal(res2.StructuredContent)
+	var avail ServicesAvailable
+	if err := json.Unmarshal(b2, &avail); err != nil || !reflect.DeepEqual(avail, ServicesAvailable{Services: []ServiceOffer{{
+		Block: "mariadb", Profile: "dev", Tags: []string{"11.8", "12.3"}, DefaultTag: "11.8",
+		EnabledTags: []string{"11.8", "12.3"}}}}) {
+		t.Errorf("services_available = %s", b2)
+	}
+	for _, out := range []string{string(b), string(b2), res.Content[0].(*sdk.TextContent).Text,
+		res2.Content[0].(*sdk.TextContent).Text} {
+		if strings.Contains(out, fakePassword) || strings.Contains(strings.ToLower(out), "password") {
+			t.Errorf("output shows a password: %s", out)
+		}
+	}
+	// B sees nothing of A.
+	csB := e.connect(e.b)
+	res3, err := csB.CallTool(context.Background(), &sdk.CallToolParams{Name: "services_available"})
+	if b3, _ := json.Marshal(res3.StructuredContent); err != nil || string(b3) != `{"services":[]}` {
+		t.Errorf("services_available for B = %s, %v", b3, err)
+	}
+
+	// No log line and no audit event has the password.
+	e.mu.Lock()
+	for _, l := range e.logs {
+		if strings.Contains(l, fakePassword) {
+			t.Errorf("log has the password: %s", l)
+		}
+	}
+	e.mu.Unlock()
+	for _, ev := range e.eventsAfter(0) {
+		if strings.Contains(ev.ArgsJSON+ev.Detail, fakePassword) {
+			t.Errorf("audit event has the password: %+v", ev)
+		}
+	}
+}
+
+func TestServiceEnableDenied(t *testing.T) {
+	e := newTestEnv(t)
+	fake := &fakeServices{allowed: e.a.id}
+	e.srv.Services = fake
+
+	for _, tt := range []struct {
+		name string
+		sb   testSandbox
+		args string
+	}{
+		{"project without ceiling", e.b, `{"block":"mariadb"}`},
+		{"tag outside ceiling", e.a, `{"block":"mariadb","tag":"11.4"}`},
+		{"unknown block", e.a, `{"block":"redis"}`},
+		{"extra project field", e.a, `{"block":"mariadb","project":"proj-b"}`},
+		{"extra sandbox field", e.a, `{"block":"mariadb","sandbox":"` + e.b.id + `"}`},
+		{"Block in capitals", e.a, `{"Block":"mariadb"}`},
+		{"tag with quote", e.a, `{"block":"mariadb","tag":"11.8'"}`},
+		{"tag with semicolon", e.a, `{"block":"mariadb","tag":"11.8;DROP"}`},
+		{"tag latest", e.a, `{"block":"mariadb","tag":"latest"}`},
+		{"empty tag", e.a, `{"block":"mariadb","tag":""}`},
+		{"tag number", e.a, `{"block":"mariadb","tag":11.8}`},
+		{"block with quote", e.a, `{"block":"maria'db"}`},
+		{"block upper", e.a, `{"block":"MariaDB"}`},
+		{"block empty", e.a, `{"block":""}`},
+		{"no block", e.a, `{}`},
+		{"null arguments", e.a, `null`},
+		{"array arguments", e.a, `["mariadb"]`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tr, ev := e.callEnable(tt.sb, tt.args)
+			if !tr.IsError || !strings.HasPrefix(tr.text(), "denied:") {
+				t.Errorf("result = isError %v, %q", tr.IsError, tr.text())
+			}
+			if ev.Result != audit.ResultDenied || ev.Actor != "mcp:"+tt.sb.id {
+				t.Errorf("event = %+v", ev)
+			}
+		})
+	}
+	// Only the first three reached the broker; the rest failed the strict
+	// decoding.
+	if len(fake.calls) != 3 {
+		t.Errorf("broker calls = %q, want 3", fake.calls)
+	}
+
+	// Without services, the handler denies too.
+	e.srv.Services = nil
+	if tr, ev := e.callEnable(e.a, `{"block":"mariadb"}`); !strings.HasPrefix(tr.text(), "denied:") ||
+		ev.Result != audit.ResultDenied {
+		t.Errorf("without services: %q, %+v", tr.text(), ev)
+	}
+	// And the handler on its own, without identity or record.
+	r, err := e.srv.serviceEnable(context.Background(), &sdk.CallToolRequest{})
 	if err != nil || !r.IsError || !strings.HasPrefix(r.Content[0].(*sdk.TextContent).Text, "denied:") {
 		t.Errorf("serviceEnable handler = %+v, %v", r, err)
-	}
-	// So does the raw path: a JSON-RPC tool result with isError.
-	code, body := e.post(e.url(e.a.id), bearer(e.a.token), callBody("service_enable", `{"block":"mariadb"}`))
-	if tr := parseToolResult(t, body); code != 200 || !tr.IsError || !strings.HasPrefix(tr.text(), "denied:") {
-		t.Errorf("raw service_enable = %d %s", code, body)
 	}
 }
 

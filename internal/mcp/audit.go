@@ -48,11 +48,16 @@ type record struct {
 	rpc       rpcRequest
 
 	denied bool   // one of our layers refused the request
-	detail string // why
+	failed bool   // a tool failed although the HTTP request succeeded
+	detail string // why, or what a tool did
 }
 
 func (r *record) deny(detail string) {
 	r.denied, r.detail = true, detail
+}
+
+func (r *record) fail(detail string) {
+	r.failed, r.detail = true, detail
 }
 
 type recordKey struct{}
@@ -155,7 +160,7 @@ func (r *record) event(status int) (audit.Event, error) {
 	switch {
 	case r.denied:
 		e.Result = audit.ResultDenied
-	case status >= 400:
+	case r.failed, status >= 400:
 		e.Result = audit.ResultError
 	default:
 		e.Result = audit.ResultOK

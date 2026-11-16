@@ -46,10 +46,13 @@ type Store interface {
 
 // Server serves MCP to the sandboxes.
 type Server struct {
-	Store   Store
-	Audit   Auditor
-	Logf    func(format string, args ...any)
-	Version string
+	Store Store
+	Audit Auditor
+	// Services backs services_available, service_enable and the services
+	// of sandbox_info. Nil means no services: empty lists and a denial.
+	Services Services
+	Logf     func(format string, args ...any)
+	Version  string
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -211,16 +214,15 @@ func readBody(w http.ResponseWriter, r *http.Request, rec *record) bool {
 }
 
 // policyDeny returns why a request is refused, or "" when it may go to
-// the SDK. In M3a a tool call is allowed only for the read-only tools.
+// the SDK. A tool call is allowed only for the known tools; each checks
+// its own arguments.
 func policyDeny(req rpcRequest) string {
 	if req.Method != "tools/call" {
 		return ""
 	}
 	switch req.ToolName {
-	case toolSandboxInfo, toolServicesAvailable:
+	case toolSandboxInfo, toolServicesAvailable, toolServiceEnable:
 		return ""
-	case toolServiceEnable:
-		return "service_enable is not available yet"
 	default:
 		return "unknown tool"
 	}
