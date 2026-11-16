@@ -91,6 +91,7 @@ func runServe(e env) error {
 		Logf:    logger.Printf,
 	}
 	mgr.Grants = brk
+	brk.Pods = mgr
 	// ApplyBaseRules emptied svc_allow4: put the elements of the existing
 	// grants back before the API and the MCP open. Failures are logged and
 	// not fatal; access then stays closed (ADR 0014).

@@ -62,28 +62,32 @@ func (s *Server) newMCPServer() *sdk.Server {
 	}, s.sandboxInfo)
 	srv.AddTool(&sdk.Tool{
 		Name:        toolServicesAvailable,
-		Description: "List the shared services this sandbox may enable, with their tags (versions).",
+		Description: "List the services this sandbox may enable, with their tags (versions).",
 		InputSchema: noInput,
 		Annotations: &sdk.ToolAnnotations{ReadOnlyHint: true, OpenWorldHint: &closedWorld},
 	}, s.servicesAvailable)
 	srv.AddTool(&sdk.Tool{
 		Name: toolServiceEnable,
-		Description: "Enable a shared service for this sandbox and get its connection details: " +
-			"an own account and database. Calling it again returns the same details.",
+		Description: "Enable a service for this sandbox and get its connection details. " +
+			"A shared service (mariadb) gives this sandbox an own account and database. " +
+			"A per-sandbox service (redis) runs privately in this sandbox, on 127.0.0.1, without account. " +
+			"Calling it again with the same tag returns the same details. " +
+			"Asking redis for another tag replaces it, and its data is lost.",
 		InputSchema: serviceEnableInput,
 		Annotations: &sdk.ToolAnnotations{OpenWorldHint: &closedWorld},
 	}, s.serviceEnable)
 	return srv
 }
 
-// ServiceInfo is an enabled service in sandbox_info, without password.
+// ServiceInfo is an enabled service in sandbox_info, without password. A
+// per-sandbox service has no user or database; a shared one always has.
 type ServiceInfo struct {
 	Block    string `json:"block"`
 	Tag      string `json:"tag"`
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Database string `json:"database"`
+	User     string `json:"user,omitempty"`
+	Database string `json:"database,omitempty"`
 }
 
 // SandboxInfo is the structured output of sandbox_info.
@@ -109,15 +113,17 @@ type ServicesAvailable struct {
 	Services []ServiceOffer `json:"services"`
 }
 
-// ServiceCredentials is the structured output of service_enable.
+// ServiceCredentials is the structured output of service_enable. A
+// per-sandbox service has no user, password or database; a shared one
+// always has.
 type ServiceCredentials struct {
 	Block    string `json:"block"`
 	Tag      string `json:"tag"`
 	Host     string `json:"host"`
 	Port     int    `json:"port"`
-	User     string `json:"user"`
-	Password string `json:"password"`
-	Database string `json:"database"`
+	User     string `json:"user,omitempty"`
+	Password string `json:"password,omitempty"`
+	Database string `json:"database,omitempty"`
 }
 
 // sandboxID returns the sandbox of the token, or "".

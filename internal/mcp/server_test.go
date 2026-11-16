@@ -584,8 +584,10 @@ func TestSandboxInfoUsesToken(t *testing.T) {
 type fakeServices struct {
 	mu      sync.Mutex
 	allowed string
-	calls   []string // sandbox block tag, per Enable
-	grants  map[string][]broker.Credentials
+	// redis puts redis (8.10, 8.8) in the ceiling of allowed.
+	redis  bool
+	calls  []string // sandbox block tag, per Enable
+	grants map[string][]broker.Credentials
 }
 
 const fakePassword = "SECRETpw0123456789abcdefghijklmnopqrstuvwxy"
@@ -600,6 +602,28 @@ func (f *fakeServices) Enable(_ context.Context, sandboxID, block, tag string) (
 	case "boom":
 		return broker.Credentials{}, errors.New("database is locked")
 	case "mariadb":
+	case "redis":
+		if sandboxID != f.allowed || !f.redis {
+			return broker.Credentials{}, fmt.Errorf("%w: block redis is not allowed for this project", broker.ErrDenied)
+		}
+		if tag == "" {
+			tag = "8.10"
+		}
+		if tag != "8.10" && tag != "8.8" {
+			return broker.Credentials{}, fmt.Errorf("%w: tag %s of block redis is not allowed for this project", broker.ErrDenied, tag)
+		}
+		if f.grants == nil {
+			f.grants = map[string][]broker.Credentials{}
+		}
+		c := broker.Credentials{Block: "redis", Tag: tag, Host: "127.0.0.1", Port: 6379}
+		kept := []broker.Credentials{c}
+		for _, g := range f.grants[sandboxID] {
+			if g.Block != "redis" {
+				kept = append(kept, g)
+			}
+		}
+		f.grants[sandboxID] = kept
+		return c, nil
 	default:
 		return broker.Credentials{}, fmt.Errorf("%w: unknown block %q", broker.ErrDenied, block)
 	}
@@ -618,7 +642,7 @@ func (f *fakeServices) Enable(_ context.Context, sandboxID, block, tag string) (
 		c.Port = 20001
 	}
 	for _, g := range f.grants[sandboxID] {
-		if g.Tag == tag {
+		if g.Block == block && g.Tag == tag {
 			return g, nil
 		}
 	}
@@ -646,8 +670,16 @@ func (f *fakeServices) Available(_ context.Context, sandboxID string) ([]broker.
 		return nil, nil
 	}
 	o := broker.Offer{Block: "mariadb", Profile: "dev", Tags: []string{"11.8", "12.3"}, DefaultTag: "11.8"}
+	r := broker.Offer{Block: "redis", Profile: "dev", Tags: []string{"8.10", "8.8"}, DefaultTag: "8.10", EnabledTags: []string{}}
 	for _, g := range f.grants[sandboxID] {
-		o.EnabledTags = append(o.EnabledTags, g.Tag)
+		if g.Block == "redis" {
+			r.EnabledTags = append(r.EnabledTags, g.Tag)
+		} else {
+			o.EnabledTags = append(o.EnabledTags, g.Tag)
+		}
+	}
+	if f.redis {
+		return []broker.Offer{o, r}, nil
 	}
 	return []broker.Offer{o}, nil
 }
@@ -767,6 +799,77 @@ func TestServiceEnableTool(t *testing.T) {
 		if strings.Contains(ev.ArgsJSON+ev.Detail, fakePassword) {
 			t.Errorf("audit event has the password: %+v", ev)
 		}
+	}
+}
+
+func TestServiceEnableRedisTool(t *testing.T) {
+	e := newTestEnv(t)
+	fake := &fakeServices{allowed: e.a.id, redis: true}
+	e.srv.Services = fake
+
+	tr, ev := e.callEnable(e.a, `{"block":"redis"}`)
+	if tr.IsError {
+		t.Fatalf("service_enable failed: %s", tr.text())
+	}
+	var fields map[string]any
+	if err := json.Unmarshal(tr.StructuredContent, &fields); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{"block": "redis", "tag": "8.10", "host": "127.0.0.1", "port": float64(6379)}
+	if !reflect.DeepEqual(fields, want) {
+		t.Errorf("structured = %v, want %v", fields, want)
+	}
+	for _, k := range []string{"user", "password", "database"} {
+		if strings.Contains(tr.text(), `"`+k+`"`) {
+			t.Errorf("text has %q: %s", k, tr.text())
+		}
+	}
+	if ev.Result != audit.ResultOK || ev.Detail != "granted redis 8.10" || ev.Actor != "mcp:"+e.a.id {
+		t.Errorf("event = %+v", ev)
+	}
+	tr, ev = e.callEnable(e.a, `{"block":"redis","tag":"8.8"}`)
+	if tr.IsError || ev.Detail != "granted redis 8.8" {
+		t.Errorf("8.8: %s, %+v", tr.text(), ev)
+	}
+
+	cs := e.connect(e.a)
+	res, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "sandbox_info"})
+	if err != nil || res.IsError {
+		t.Fatalf("sandbox_info: %v %v", res, err)
+	}
+	b, _ := json.Marshal(res.StructuredContent)
+	var info struct {
+		Services []map[string]any `json:"services"`
+	}
+	if err := json.Unmarshal(b, &info); err != nil || !reflect.DeepEqual(info.Services, []map[string]any{
+		{"block": "redis", "tag": "8.8", "host": "127.0.0.1", "port": float64(6379)}}) {
+		t.Errorf("sandbox_info = %s", b)
+	}
+	res2, err := cs.CallTool(context.Background(), &sdk.CallToolParams{Name: "services_available"})
+	if err != nil || res2.IsError {
+		t.Fatalf("services_available: %v %v", res2, err)
+	}
+	b2, _ := json.Marshal(res2.StructuredContent)
+	var avail ServicesAvailable
+	if err := json.Unmarshal(b2, &avail); err != nil || len(avail.Services) != 2 || !reflect.DeepEqual(avail.Services[1], ServiceOffer{
+		Block: "redis", Profile: "dev", Tags: []string{"8.10", "8.8"}, DefaultTag: "8.10", EnabledTags: []string{"8.8"}}) {
+		t.Errorf("services_available = %s", b2)
+	}
+
+	// A tag of the wrong form is denied before the broker.
+	calls := len(fake.calls)
+	for _, args := range []string{`{"block":"redis","tag":"8.10;id"}`, `{"block":"redis","tag":"latest"}`, `{"block":"redis","tag":"08.1"}`} {
+		tr, ev := e.callEnable(e.a, args)
+		if !tr.IsError || !strings.HasPrefix(tr.text(), "denied:") || ev.Result != audit.ResultDenied {
+			t.Errorf("%s: %q, %+v", args, tr.text(), ev)
+		}
+	}
+	if len(fake.calls) != calls {
+		t.Errorf("a badly formed tag reached the broker: %q", fake.calls[calls:])
+	}
+	// B has no redis.
+	if tr, ev := e.callEnable(e.b, `{"block":"redis"}`); !strings.HasPrefix(tr.text(), "denied:") || ev.Result != audit.ResultDenied {
+		t.Errorf("B: %q, %+v", tr.text(), ev)
 	}
 }
 
