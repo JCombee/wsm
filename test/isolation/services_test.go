@@ -338,6 +338,11 @@ func TestBlockCeilingRejectsBadInput(t *testing.T) {
 			t.Errorf("wsm %v succeeded: %s", full, out)
 		}
 	}
+	// A tag that does not exist is invalid input (M3c).
+	if code, body := apiStatus(ctx, t, "PUT", "/v1/projects/"+s.a.slug+"/blocks/mariadb", `{"tags":["99.9"]}`); code != 400 ||
+		!strings.Contains(body, "does not exist") {
+		t.Errorf("unknown tag through the API: %d %s, want 400", code, body)
+	}
 	if after, err := wsm(ctx, "project", "block", "list", s.a.slug); err != nil || after != before {
 		t.Errorf("ceiling changed:\n%s\nwas:\n%s", after, before)
 	}
