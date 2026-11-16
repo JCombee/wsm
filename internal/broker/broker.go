@@ -1,5 +1,6 @@
 // Package broker manages the shared service instances and the project
-// ceilings for blocks (plan section 3.6, ADR 0013).
+// ceilings for blocks (plan section 3.6, ADR 0013), and hands per-sandbox
+// services such as Redis to the sandbox manager (ADR 0015).
 //
 // Each (block, tag) has one instance under the service user, published on
 // its own port on wsm0. The broker hands out ports, keeps each instance's
@@ -24,6 +25,7 @@ import (
 	"github.com/JCombee/wsm/internal/blocks"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/helper"
+	"github.com/JCombee/wsm/internal/sandbox"
 	"github.com/JCombee/wsm/internal/secret"
 )
 
@@ -37,6 +39,15 @@ type Helper interface {
 	EnsureServiceInstance(ctx context.Context, service, tag string, port int, password string) error
 	AllowService(ctx context.Context, uid, port int) error
 	RevokeService(ctx context.Context, uid, port int) error
+}
+
+// Pods is the part of the sandbox manager that runs per-sandbox services
+// (ADR 0015). EnsureService takes the manager's lock before it calls
+// record, and record takes grantMu: the lock order is always the
+// manager's, then grantMu, as in a sandbox delete.
+type Pods interface {
+	PullServiceImage(ctx context.Context, projectID string, blk blocks.Block, tag string) error
+	EnsureService(ctx context.Context, sandboxID string, blk blocks.Block, tag string, record func(context.Context) error) error
 }
 
 // Service states.
@@ -87,7 +98,10 @@ type Broker struct {
 	// GrantWait bounds how long Enable waits for a root login; zero means
 	// 60 seconds.
 	GrantWait time.Duration
-	Logf      func(format string, args ...any)
+	// Pods runs per-sandbox services in sandbox pods (the sandbox
+	// manager). Nil means per-sandbox blocks are not available.
+	Pods Pods
+	Logf func(format string, args ...any)
 
 	// mu serializes SetBlock, RemoveBlock and EnsureAll. It is separate
 	// from the sandbox manager's lock, because a pull can take minutes.
@@ -145,9 +159,9 @@ func (b *Broker) SetBlock(ctx context.Context, projectSlug, blockID, profile str
 	if err != nil {
 		return Ceiling{}, fmt.Errorf("%w: %v", ErrInvalid, err)
 	}
-	blk, err := blocks.LookupShared(blockID)
-	if err != nil {
-		return Ceiling{}, fmt.Errorf("%w: %v", ErrInvalid, err)
+	blk, ok := blocks.Lookup(blockID)
+	if !ok {
+		return Ceiling{}, fmt.Errorf("%w: unknown block %q", ErrInvalid, blockID)
 	}
 	p, err := b.Store.ProjectBySlug(ctx, projectSlug)
 	if err != nil {
@@ -159,6 +173,15 @@ func (b *Broker) SetBlock(ctx context.Context, projectSlug, blockID, profile str
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if blk.Kind == blocks.KindPerSandbox {
+		if err := b.pullPerSandbox(ctx, p, blk, tags); err != nil {
+			return Ceiling{}, err
+		}
+		return b.storeCeiling(ctx, p, blockID, profile, tags)
+	}
+	if blk.Kind != blocks.KindShared {
+		return Ceiling{}, fmt.Errorf("%w: block %s has no ceiling", ErrInvalid, blockID)
+	}
 
 	insts := make([]instance, 0, len(tags))
 	for _, tag := range tags {
@@ -178,6 +201,29 @@ func (b *Broker) SetBlock(ctx context.Context, projectSlug, blockID, profile str
 			return Ceiling{}, err
 		}
 	}
+	return b.storeCeiling(ctx, p, blockID, profile, tags)
+}
+
+// pullPerSandbox pulls the image of each tag of a per-sandbox block as the
+// project user, so the ceiling only lists tags that exist. Call with mu.
+func (b *Broker) pullPerSandbox(ctx context.Context, p db.Project, blk blocks.Block, tags []string) error {
+	if b.Pods == nil {
+		return fmt.Errorf("block %s: per-sandbox services are not available", blk.ID)
+	}
+	for _, tag := range tags {
+		if err := b.Pods.PullServiceImage(ctx, p.ID, blk, tag); err != nil {
+			if errors.Is(err, sandbox.ErrUnknownTag) {
+				return fmt.Errorf("%w: tag %s of block %s does not exist", ErrInvalid, tag, blk.ID)
+			}
+			return fmt.Errorf("pull %s %s for project %s: %w", blk.ID, tag, p.Slug, err)
+		}
+	}
+	return nil
+}
+
+// storeCeiling checks again, under grantMu, that no sandbox uses a tag
+// outside tags and stores the ceiling. Call with mu.
+func (b *Broker) storeCeiling(ctx context.Context, p db.Project, blockID, profile string, tags []string) (Ceiling, error) {
 	cfg, err := json.Marshal(config{Tags: tags})
 	if err != nil {
 		return Ceiling{}, fmt.Errorf("set block: %w", err)
@@ -298,7 +344,8 @@ func (b *Broker) address(port int) string {
 
 // RemoveBlock removes the ceiling of a project for a block. The instances
 // stay: other projects may use them. While sandboxes of the project have
-// a grant on the block, it fails with ErrConflict.
+// a grant on the block, or run it as a per-sandbox service, it fails with
+// ErrConflict.
 func (b *Broker) RemoveBlock(ctx context.Context, projectSlug, blockID string) error {
 	p, err := b.Store.ProjectBySlug(ctx, projectSlug)
 	if err != nil {

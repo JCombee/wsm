@@ -12,6 +12,7 @@ import (
 	"github.com/JCombee/wsm/internal/blocks"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/helper"
+	"github.com/JCombee/wsm/internal/sandbox"
 )
 
 // ErrDenied is returned when a sandbox asks for something outside its
@@ -103,7 +104,7 @@ func (b *Broker) liveSandbox(ctx context.Context, sandboxID string) (db.Project,
 // allowedTag checks block and tag against the ceiling of a project and
 // returns the tag to use: an empty tag means the default.
 func (b *Broker) allowedTag(ctx context.Context, projectID, blockID, tag string) (string, error) {
-	if _, err := blocks.LookupShared(blockID); err != nil {
+	if _, ok := blocks.Lookup(blockID); !ok {
 		return "", fmt.Errorf("%w: unknown block %q", ErrDenied, blockID)
 	}
 	c, ok, err := b.ceiling(ctx, projectID, blockID)
@@ -142,11 +143,16 @@ func (b *Broker) waitRoot(ctx context.Context, inst instance) (SQLConn, error) {
 	}
 }
 
-// Enable gives a sandbox an account on the instance of block for tag,
-// within its project's ceiling, and returns the credentials. The account
-// exists and the nftables element is in place before anything is
+// Enable gives a sandbox block at tag, within its project's ceiling, and
+// returns how to reach it.
+//
+// For a shared block it creates an account on the instance of the tag. The
+// account exists and the nftables element is in place before anything is
 // returned (CLAUDE.md invariant 7). Calling it again returns the same
 // credentials and repairs the account.
+//
+// For a per-sandbox block it runs the service in the sandbox's pod and
+// returns once it answers; see enablePerSandbox.
 func (b *Broker) Enable(ctx context.Context, sandboxID, blockID, tag string) (Credentials, error) {
 	p, sb, err := b.liveSandbox(ctx, sandboxID)
 	if err != nil {
@@ -155,6 +161,9 @@ func (b *Broker) Enable(ctx context.Context, sandboxID, blockID, tag string) (Cr
 	tag, err = b.allowedTag(ctx, p.ID, blockID, tag)
 	if err != nil {
 		return Credentials{}, err
+	}
+	if blk, _ := blocks.Lookup(blockID); blk.Kind == blocks.KindPerSandbox {
+		return b.enablePerSandbox(ctx, p, sb, blk, tag)
 	}
 	stored, err := b.Store.ServiceInstance(ctx, blockID, tag)
 	if errors.Is(err, db.ErrNotFound) {
@@ -196,6 +205,51 @@ func (b *Broker) Enable(ctx context.Context, sandboxID, blockID, tag string) (Cr
 	b.logf("sandbox %s/%s: granted %s %s", p.Slug, sb.Slug, blockID, tag)
 	return Credentials{Block: blockID, Tag: tag, Host: b.Addr.String(), Port: inst.Port,
 		User: acct, Password: password, Database: appDatabase(sb.ID)}, nil
+}
+
+// localHost is where a per-sandbox service listens: the pod's loopback,
+// which only the sandbox's own containers share.
+const localHost = "127.0.0.1"
+
+// enablePerSandbox runs a per-sandbox service at tag in the sandbox's pod
+// (ADR 0015). The sandbox manager takes its lock (bounded by the grant
+// wait), checks the sandbox, and calls record, which checks the token and
+// the ceiling again under grantMu and stores the tag. Only then does it
+// touch the container: a different tag replaces it. The credentials come
+// after the service answered. When record succeeded but the container did
+// not come up, the row keeps the new tag and a next call repairs it.
+func (b *Broker) enablePerSandbox(ctx context.Context, p db.Project, sb db.Sandbox, blk blocks.Block, tag string) (Credentials, error) {
+	if b.Pods == nil {
+		return Credentials{}, fmt.Errorf("%w: %s %s", ErrUnavailable, blk.ID, tag)
+	}
+	ctx, cancel := context.WithTimeout(ctx, b.grantWait())
+	defer cancel()
+	record := func(ctx context.Context) error {
+		b.grantMu.Lock()
+		defer b.grantMu.Unlock()
+		// Again under the lock: a delete clears the token first, and
+		// the ceiling may have shrunk since the check in Enable.
+		lp, lsb, err := b.liveSandbox(ctx, sb.ID)
+		if err != nil {
+			return err
+		}
+		if _, err := b.allowedTag(ctx, lp.ID, blk.ID, tag); err != nil {
+			return err
+		}
+		return b.Store.SetSandboxService(ctx, lsb.ID, blk.ID, tag)
+	}
+	err := b.Pods.EnsureService(ctx, sb.ID, blk, tag, record)
+	switch {
+	case errors.Is(err, sandbox.ErrServiceDenied):
+		return Credentials{}, fmt.Errorf("%w: this sandbox is being deleted", ErrDenied)
+	case errors.Is(err, sandbox.ErrServiceUnavailable):
+		b.logf("sandbox %s/%s: %s %s not available: %v", p.Slug, sb.Slug, blk.ID, tag, err)
+		return Credentials{}, fmt.Errorf("%w: %s %s", ErrUnavailable, blk.ID, tag)
+	case err != nil:
+		return Credentials{}, err
+	}
+	b.logf("sandbox %s/%s: granted %s %s", p.Slug, sb.Slug, blk.ID, tag)
+	return Credentials{Block: blk.ID, Tag: tag, Host: localHost, Port: blk.ContainerPort}, nil
 }
 
 // grantPassword returns the password of the grant of a sandbox on an
@@ -328,6 +382,10 @@ func (b *Broker) Available(ctx context.Context, sandboxID string) ([]Offer, erro
 	if err != nil {
 		return nil, err
 	}
+	local, err := b.Store.SandboxServices(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
 	out := make([]Offer, 0, len(rows))
 	for _, r := range rows {
 		var cfg config
@@ -343,12 +401,18 @@ func (b *Broker) Available(ctx context.Context, sandboxID string) ([]Offer, erro
 				o.EnabledTags = append(o.EnabledTags, g.Tag)
 			}
 		}
+		for _, v := range local {
+			if v.BlockID == r.BlockID {
+				o.EnabledTags = append(o.EnabledTags, v.Tag)
+			}
+		}
 		out = append(out, o)
 	}
 	return out, nil
 }
 
-// Enabled returns the grants of a sandbox, without passwords.
+// Enabled returns the grants of a sandbox, without passwords, followed by
+// its per-sandbox services.
 func (b *Broker) Enabled(ctx context.Context, sandboxID string) ([]Enabled, error) {
 	acct, err := accountName(sandboxID)
 	if err != nil {
@@ -358,22 +422,40 @@ func (b *Broker) Enabled(ctx context.Context, sandboxID string) ([]Enabled, erro
 	if err != nil {
 		return nil, err
 	}
-	out := make([]Enabled, 0, len(grants))
+	local, err := b.Store.SandboxServices(ctx, sandboxID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Enabled, 0, len(grants)+len(local))
 	for _, g := range grants {
 		out = append(out, Enabled{Block: g.BlockID, Tag: g.Tag, Host: b.Addr.String(), Port: g.Port,
 			User: acct, Database: appDatabase(sandboxID)})
+	}
+	for _, v := range local {
+		blk, ok := blocks.Lookup(v.BlockID)
+		if !ok {
+			continue
+		}
+		out = append(out, Enabled{Block: v.BlockID, Tag: v.Tag, Host: localHost, Port: blk.ContainerPort})
 	}
 	return out, nil
 }
 
 // checkCeilingKeepsGrants fails with ErrConflict when sandboxes of the
-// project have a grant on block outside tags (all of block when tags is
-// empty).
+// project have a grant on block, or run it as a per-sandbox service,
+// outside tags (all of block when tags is empty).
 func (b *Broker) checkCeilingKeepsGrants(ctx context.Context, p db.Project, blockID string, tags []string) error {
 	slugs, err := b.Store.GrantsOutsideCeiling(ctx, p.ID, blockID, tags)
 	if err != nil {
 		return err
 	}
+	local, err := b.Store.SandboxServicesOutsideCeiling(ctx, p.ID, blockID, tags)
+	if err != nil {
+		return err
+	}
+	slugs = append(slugs, local...)
+	slices.Sort(slugs)
+	slugs = slices.Compact(slugs)
 	if len(slugs) > 0 {
 		return fmt.Errorf("%w: block %s of project %s is in use by sandbox(es) %s; delete them first",
 			ErrConflict, blockID, p.Slug, strings.Join(slugs, ", "))
