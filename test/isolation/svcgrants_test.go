@@ -721,7 +721,9 @@ func TestServiceEnableAudited(t *testing.T) {
 		switch result {
 		case "ok":
 			okN++
-			if !strings.HasPrefix(detail, "granted mariadb ") {
+			// The audit log outlives test runs, and the Redis tests also
+			// call service_enable.
+			if !strings.HasPrefix(detail, "granted mariadb ") && !strings.HasPrefix(detail, "granted redis ") {
 				t.Errorf("ok event with detail %q", detail)
 			}
 		case "denied":

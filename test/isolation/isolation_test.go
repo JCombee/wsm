@@ -10,6 +10,8 @@ import (
 	"os"
 	"os/user"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -413,7 +415,8 @@ func TestManagerAPINotReachable(t *testing.T) {
 			t.Errorf("%s: /run/wsm exists in the sandbox %s", p.slug, out)
 		}
 	}
-	// The manager's only TCP listener is the MCP server on wsm0 (ADR 0012).
+	// The manager's TCP listeners: the MCP server on wsm0 (ADR 0012), and
+	// the dashboard and the preview proxy on loopback (ADR 0016, 0017).
 	out, err := run(ctx, "ss", "-Hltnp")
 	if err != nil {
 		t.Fatal(err)
@@ -430,8 +433,24 @@ func TestManagerAPINotReachable(t *testing.T) {
 		}
 		listeners = append(listeners, f[3])
 	}
-	if len(listeners) != 1 || listeners[0] != "10.255.0.1:7443" {
-		t.Errorf("wsm TCP listeners = %v, want only 10.255.0.1:7443", listeners)
+	sort.Strings(listeners)
+	if want := []string{"10.255.0.1:7443", dashAddr, previewAddr}; !slices.Equal(listeners, want) {
+		t.Errorf("wsm TCP listeners = %v, want %v", listeners, want)
+	}
+	// Project users and sandboxes reach neither loopback listener.
+	for _, addr := range []string{dashAddr, previewAddr} {
+		for _, p := range []project{s.a, s.b} {
+			blockedBy(t, "loopback_blocked", p.user+" to "+addr, func() (bool, string) {
+				return probeAs(ctx, p.user, "tcp:"+addr)
+			})
+			_, port, _ := net.SplitHostPort(addr)
+			n, _ := strconv.Atoi(port)
+			for _, h := range []string{"169.254.1.2", s.hostAddr} {
+				if ok, out := tcpFromSandbox(ctx, p, h, n); ok {
+					t.Errorf("sandbox %s reached port %d via %s: %s", p.slug, n, h, out)
+				}
+			}
+		}
 	}
 	// Root reaches the MCP port neither on loopback nor on the host's
 	// address: nothing listens there.
