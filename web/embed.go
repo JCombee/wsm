@@ -1,5 +1,6 @@
 // Package web embeds the built dashboard frontend (web/dist, made by
-// "make web"). Without a build, dist holds only a placeholder page.
+// "make web"). Without a build, dist holds only .gitkeep and the dashboard
+// answers with a hint to run make web.
 package web
 
 import (

@@ -14,8 +14,8 @@ export CGO_ENABLED := 0
 
 .PHONY: build web test lint isolation-build isolation-test clean
 
-# build embeds whatever is in web/dist: the real frontend after "make web",
-# a placeholder page otherwise.
+# build embeds whatever is in web/dist: the frontend after "make web", or
+# nothing (the dashboard then asks for make web).
 build:
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/wsm ./cmd/wsm
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/wsm-helper ./cmd/wsm-helper

@@ -1,0 +1,5 @@
+node_modules/
+# The build output is embedded into wsm and not committed; .gitkeep keeps
+# go:embed working without a build.
+dist/*
+!dist/.gitkeep

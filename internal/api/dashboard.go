@@ -6,7 +6,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/JCombee/wsm/internal/broker"
 	"github.com/JCombee/wsm/internal/fsproto"
 )
 
@@ -76,6 +75,16 @@ func (s *Server) writeFile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp.Entry)
 }
 
+// EnabledService is a service a sandbox enabled, without its password.
+type EnabledService struct {
+	Block    string `json:"block"`
+	Tag      string `json:"tag"`
+	Host     string `json:"host"`
+	Port     int    `json:"port"`
+	User     string `json:"user,omitempty"`
+	Database string `json:"database,omitempty"`
+}
+
 // sandboxServices lists the services a sandbox enabled, without secrets.
 func (s *Server) sandboxServices(w http.ResponseWriter, r *http.Request) {
 	_, sb, err := s.Manager.Lookup(r.Context(), r.PathValue("project"), r.PathValue("sandbox"))
@@ -83,13 +92,15 @@ func (s *Server) sandboxServices(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	out, err := s.Broker.Enabled(r.Context(), sb.ID)
+	enabled, err := s.Broker.Enabled(r.Context(), sb.ID)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
-	if out == nil {
-		out = []broker.Enabled{}
+	out := make([]EnabledService, 0, len(enabled))
+	for _, e := range enabled {
+		out = append(out, EnabledService{Block: e.Block, Tag: e.Tag, Host: e.Host, Port: e.Port,
+			User: e.User, Database: e.Database})
 	}
 	writeJSON(w, http.StatusOK, out)
 }
