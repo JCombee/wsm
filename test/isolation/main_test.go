@@ -50,7 +50,7 @@ const wsmBin = "/usr/local/bin/wsm"
 
 // testSlugs are all projects the tests create; setup and teardown delete
 // them.
-var testSlugs = []string{"iso-a", "iso-b", "iso-c", "iso-d", "iso-e", "iso-f", "iso-g", "iso-h", "iso-s", "iso-m", "iso-n", "iso-r", "iso-q"}
+var testSlugs = []string{"iso-a", "iso-b", "iso-c", "iso-d", "iso-e", "iso-f", "iso-g", "iso-h", "iso-s", "iso-m", "iso-n", "iso-r", "iso-q", "iso-p"}
 
 // project is a project created for the tests, with one running sandbox.
 type project struct {
@@ -109,6 +109,10 @@ func probe(spec string) int {
 	if kind == "helper" {
 		// Runs as user wsm; see services_test.go.
 		return helperProbe(os.Stdin, os.Stdout)
+	}
+	if kind == "httpecho" {
+		// Runs inside a workspace container; see preview_test.go.
+		return httpEchoProbe(target)
 	}
 	if kind == "sql" {
 		// Runs inside a workspace container; see svcgrants_test.go.

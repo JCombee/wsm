@@ -1,0 +1,33 @@
+# Example workspace image for a Laravel project (plan section 3.8).
+#
+#   wsm project create --slug shop --containerfile examples/laravel/Containerfile \
+#       --repo git@github.com:org/shop.git --app-port 8000
+#   wsm project block set shop mariadb --tag 11.4
+#
+# wsm needs tmux, git and bash, and a user 1000 with home /home/agent. The
+# container runs as that user without capabilities, so everything the agent
+# needs as root must be installed here.
+FROM docker.io/library/php:8.3-cli-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tmux git bash unzip ca-certificates curl less vim-tiny \
+        libzip-dev libicu-dev libpng-dev libonig-dev nodejs npm \
+    && docker-php-ext-install pdo_mysql zip intl gd mbstring bcmath pcntl \
+    && pecl install redis && docker-php-ext-enable redis \
+    && rm -rf /var/lib/apt/lists/* /tmp/pear
+
+COPY --from=docker.io/library/composer:2 /usr/bin/composer /usr/local/bin/composer
+
+RUN groupadd --gid 1000 agent \
+    && useradd --uid 1000 --gid 1000 --home-dir /home/agent --create-home --shell /bin/bash agent
+
+ENV COMPOSER_HOME=/home/agent/.composer \
+    PATH=/home/agent/.composer/vendor/bin:$PATH
+
+USER 1000:1000
+WORKDIR /workspace
+
+# The sandbox keeps running; the agent starts the app in tmux, for example
+# "php artisan serve --host 0.0.0.0 --port 8000". Database and Redis
+# credentials come from the MCP tool service_enable, never from this image.
+CMD ["sleep", "infinity"]

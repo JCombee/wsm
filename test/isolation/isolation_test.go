@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/JCombee/wsm/internal/fsproto"
 	"github.com/JCombee/wsm/internal/helper"
 	"github.com/JCombee/wsm/internal/projectuid"
 	"github.com/JCombee/wsm/internal/sandbox"
@@ -128,6 +129,7 @@ type inspect struct {
 		Name        string `json:"Name"`
 		Source      string `json:"Source"`
 		Destination string `json:"Destination"`
+		RW          bool   `json:"RW"`
 	} `json:"Mounts"`
 	HostConfig struct {
 		Privileged  bool     `json:"Privileged"`
@@ -295,10 +297,18 @@ func TestNoHostMounts(t *testing.T) {
 				want[sandbox.HomeVolume(pr.ID)] = sandbox.HomeDir
 			}
 		}
-		if len(ci.Mounts) != 2 {
-			t.Errorf("%s: %d mounts, want 2: %+v", p.slug, len(ci.Mounts), ci.Mounts)
+		if len(ci.Mounts) != 3 {
+			t.Errorf("%s: %d mounts, want 3: %+v", p.slug, len(ci.Mounts), ci.Mounts)
 		}
 		for _, m := range ci.Mounts {
+			// The one host path: the wsm-fs helper, read-only (CLAUDE.md
+			// invariant 1).
+			if m.Type == "bind" {
+				if m.Source != sandbox.DefaultHelperDir || m.Destination != fsproto.Dir || m.RW {
+					t.Errorf("%s: unexpected bind mount %+v", p.slug, m)
+				}
+				continue
+			}
 			if m.Type != "volume" || want[m.Name] != m.Destination {
 				t.Errorf("%s: unexpected mount %+v", p.slug, m)
 			}
@@ -309,6 +319,9 @@ func TestNoHostMounts(t *testing.T) {
 		if len(ci.HostConfig.Binds) > 0 {
 			for _, b := range ci.HostConfig.Binds {
 				name, _, _ := strings.Cut(b, ":")
+				if strings.HasPrefix(b, sandbox.DefaultHelperDir+":"+fsproto.Dir+":ro") {
+					continue
+				}
 				if _, ok := want[name]; !ok {
 					t.Errorf("%s: bind %q", p.slug, b)
 				}

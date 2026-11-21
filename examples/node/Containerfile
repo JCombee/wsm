@@ -1,0 +1,31 @@
+# Example workspace image for a Node.js project (plan section 3.8).
+#
+#   wsm project create --slug web --containerfile examples/node/Containerfile \
+#       --repo git@github.com:org/web.git --app-port 3000
+#
+# wsm needs tmux, git and bash, and a user 1000 with home /home/agent. The
+# container runs as that user without capabilities, so everything the agent
+# needs as root must be installed here.
+FROM docker.io/library/node:22-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends tmux git bash ca-certificates curl less vim-tiny \
+    && rm -rf /var/lib/apt/lists/*
+
+# The node image already has user 1000 ("node"); rename it to agent and
+# move its home to /home/agent.
+RUN usermod --login agent --home /home/agent --move-home node \
+    && groupmod --new-name agent node
+
+# npm installs global packages into the agent's home, which persists per
+# project (proj-<id>-home).
+ENV NPM_CONFIG_PREFIX=/home/agent/.npm-global \
+    PATH=/home/agent/.npm-global/bin:$PATH
+
+USER 1000:1000
+WORKDIR /workspace
+
+# The sandbox keeps running; the agent starts the app in tmux, for example
+# "npm run dev -- --host 0.0.0.0 --port 3000". The preview proxy reaches it
+# on the app port (WSM_PREVIEW_URL).
+CMD ["sleep", "infinity"]
