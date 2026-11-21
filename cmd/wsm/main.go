@@ -38,8 +38,9 @@ func commands() map[string]command {
 			return nil
 		}},
 		"audit":   {"audit verify [--db PATH]", runAudit},
-		"serve":   {"serve [--db PATH] [--socket PATH] [--helper-socket PATH]", runServe},
-		"project": {"project create --slug SLUG (--image REF | --containerfile PATH) [--repo SSH-URL [--branch BASE]] [--name NAME] [--cpus N] [--memory SIZE] [--pids N] | image SLUG | key SLUG | list | delete SLUG | block list SLUG | block set SLUG BLOCK --tag TAG [--tag TAG]... [--profile NAME] | block remove SLUG BLOCK", runProject},
+		"auth":    {"auth enroll", runAuth},
+		"serve":   {"serve [--db PATH] [--socket PATH] [--helper-socket PATH] [--dashboard-host HOST --dashboard-addr ADDR] [--preview-domain DOMAIN --preview-addr ADDR]", runServe},
+		"project": {"project create --slug SLUG (--image REF | --containerfile PATH) [--repo SSH-URL [--branch BASE]] [--name NAME] [--cpus N] [--memory SIZE] [--pids N] [--app-port PORT] | image SLUG | key SLUG | list | delete SLUG | block list SLUG | block set SLUG BLOCK --tag TAG [--tag TAG]... [--profile NAME] | block remove SLUG BLOCK", runProject},
 		"service": {"service list", runService},
 		"sandbox": {"sandbox create|start|stop|delete PROJECT/SANDBOX | list [PROJECT]", runSandbox},
 		"shell":   {"shell PROJECT/SANDBOX", runShell},

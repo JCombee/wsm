@@ -241,3 +241,30 @@ func (m *Manager) PullServiceImage(ctx context.Context, projectID string, blk bl
 	}
 	return nil
 }
+
+// RemoveService stops and removes a per-sandbox service container and
+// deletes its record. A container that is already gone is fine.
+func (m *Manager) RemoveService(ctx context.Context, sandboxID, blockID string) error {
+	if err := m.lockWithin(ctx); err != nil {
+		return err
+	}
+	defer m.mu.Unlock()
+	sb, err := m.Store.SandboxByID(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	p, err := m.Store.ProjectByID(ctx, sb.ProjectID)
+	if err != nil {
+		return err
+	}
+	pc := m.Podman(p.LinuxUID)
+	defer pc.Close()
+	if err := pc.ContainerRemove(ctx, ServiceContainer(sb.ID, blockID)); err != nil && !podman.IsNotFound(err) {
+		return err
+	}
+	if err := m.Store.DeleteSandboxService(ctx, sb.ID, blockID); err != nil {
+		return err
+	}
+	m.logf("sandbox %s/%s: removed service %s", p.Slug, sb.Slug, blockID)
+	return nil
+}

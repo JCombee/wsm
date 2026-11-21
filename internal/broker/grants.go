@@ -462,3 +462,47 @@ func (b *Broker) checkCeilingKeepsGrants(ctx context.Context, p db.Project, bloc
 	}
 	return nil
 }
+
+// Revoke takes one service away from a sandbox, from the dashboard: a
+// shared-instance grant is revoked like in RevokeSandbox; a per-sandbox
+// service container is removed. It fails with db.ErrNotFound when the
+// sandbox has neither for blockID.
+func (b *Broker) Revoke(ctx context.Context, sandboxID, blockID string) error {
+	local, err := b.Store.SandboxServices(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	for _, v := range local {
+		if v.BlockID == blockID {
+			if b.Pods == nil {
+				return fmt.Errorf("block %s: per-sandbox services are not available", blockID)
+			}
+			return b.Pods.RemoveService(ctx, sandboxID, blockID)
+		}
+	}
+	b.grantMu.Lock()
+	defer b.grantMu.Unlock()
+	grants, err := b.Store.GrantsBySandbox(ctx, sandboxID)
+	if err != nil {
+		return err
+	}
+	for _, g := range grants {
+		if g.BlockID != blockID {
+			continue
+		}
+		sb, err := b.Store.SandboxByID(ctx, sandboxID)
+		if err != nil {
+			return err
+		}
+		p, err := b.Store.ProjectByID(ctx, sb.ProjectID)
+		if err != nil {
+			return err
+		}
+		if err := b.revokeGrant(ctx, p, g); err != nil {
+			return fmt.Errorf("revoke %s %s of sandbox %s/%s: %w", g.BlockID, g.Tag, p.Slug, sb.Slug, err)
+		}
+		b.logf("sandbox %s/%s: revoked %s %s from the dashboard", p.Slug, sb.Slug, g.BlockID, g.Tag)
+		return nil
+	}
+	return fmt.Errorf("service %s of sandbox %s: %w", blockID, sandboxID, db.ErrNotFound)
+}

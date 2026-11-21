@@ -15,7 +15,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/JCombee/wsm/internal/auth"
 	"github.com/JCombee/wsm/internal/db"
+	"github.com/JCombee/wsm/internal/fsproto"
 	"github.com/JCombee/wsm/internal/gitmgr"
 	"github.com/JCombee/wsm/internal/mcptoken"
 	"github.com/JCombee/wsm/internal/podman"
@@ -126,9 +128,36 @@ type Manager struct {
 	// Grants revokes a sandbox's service grants when it is deleted
 	// (CLAUDE.md invariant 7). Nil means there are none.
 	Grants Grants
-	Logf   func(format string, args ...any)
+	// Host holds host settings that end up in every sandbox.
+	Host Host
+	Logf func(format string, args ...any)
 
 	mu sync.Mutex
+}
+
+// Host holds the host settings sandboxes depend on.
+type Host struct {
+	// PreviewDomain is the domain of preview hosts (ADR 0017); empty
+	// means no previews and no WSM_PREVIEW_URL.
+	PreviewDomain string
+	// HelperDir is the host directory with wsm-fs, mounted read-only at
+	// fsproto.Dir; empty means no file helper.
+	HelperDir string
+}
+
+// DefaultHelperDir is where install.sh puts wsm-fs.
+const DefaultHelperDir = "/usr/local/lib/wsm/bin"
+
+// PreviewURL returns the preview URL of a sandbox, or "" when it has none.
+func (h Host) PreviewURL(p db.Project, sb db.Sandbox) string {
+	if p.AppPort == 0 {
+		return ""
+	}
+	host, ok := auth.PreviewHost(sb.Slug, p.Slug, h.PreviewDomain)
+	if !ok {
+		return ""
+	}
+	return "https://" + host + "/"
 }
 
 // Grants is the part of the broker that revokes service grants.
@@ -156,6 +185,9 @@ type ProjectSpec struct {
 	// gitmgr.DefaultBranch and needs a RepoURL.
 	RepoURL    string
 	BaseBranch string
+	// AppPort is the port the app listens on in the pod, for the preview;
+	// 0 means no preview.
+	AppPort int
 }
 
 // ValidSlug reports whether s is a valid project or sandbox slug.
@@ -191,6 +223,8 @@ func (s *ProjectSpec) validate() error {
 		return fmt.Errorf("%w: memory %d bytes is outside %d-%d", ErrInvalid, s.MemBytes, int64(MinMemBytes), int64(MaxMemBytes))
 	case s.PidsLimit < MinPids || s.PidsLimit > MaxPids:
 		return fmt.Errorf("%w: pids %d is outside %d-%d", ErrInvalid, s.PidsLimit, MinPids, MaxPids)
+	case s.AppPort < 0 || s.AppPort > 65535:
+		return fmt.Errorf("%w: app port %d is outside 1-65535", ErrInvalid, s.AppPort)
 	}
 	for _, r := range s.Name {
 		if r < 0x20 || r == 0x7f {
@@ -259,6 +293,7 @@ func (m *Manager) CreateProject(ctx context.Context, spec ProjectSpec, userName 
 		Slug: spec.Slug, Name: spec.Name, ImageSource: spec.imageSource(),
 		ImageRef: spec.ImageRef, Containerfile: spec.Containerfile,
 		CPUMillis: spec.CPUMillis, MemBytes: spec.MemBytes, PidsLimit: spec.PidsLimit,
+		AppPort: spec.AppPort,
 	}
 	if spec.RepoURL != "" {
 		if err := m.newDeployKey(&p, spec); err != nil {
@@ -417,8 +452,13 @@ func workCommand(cfg podman.ImageConfig) []string {
 // hardening of CLAUDE.md invariant 9. The only volumes are the sandbox's
 // code volume and the project's home volume; there are no host mounts.
 // mcpToken is the sandbox's MCP bearer token; the environment is the only
-// place it is kept (ADR 0012).
-func WorkSpec(p db.Project, sb db.Sandbox, cmd []string, mcpToken string) podman.ContainerSpec {
+// place it is kept (ADR 0012). The one host path is the read-only wsm-fs
+// helper, when h.HelperDir is set (CLAUDE.md invariant 1).
+func WorkSpec(p db.Project, sb db.Sandbox, cmd []string, mcpToken string, h Host) podman.ContainerSpec {
+	var mounts []podman.Mount
+	if h.HelperDir != "" {
+		mounts = []podman.Mount{podman.HelperMount(h.HelperDir, fsproto.Dir)}
+	}
 	return podman.ContainerSpec{
 		Name:            WorkContainer(sb.ID),
 		Image:           ProjectImage(p),
@@ -426,7 +466,7 @@ func WorkSpec(p db.Project, sb db.Sandbox, cmd []string, mcpToken string) podman
 		Labels:          labels(p, sb),
 		User:            strconv.Itoa(ContainerUID) + ":" + strconv.Itoa(ContainerGID),
 		Command:         cmd,
-		Env:             workEnv(p, sb, mcpToken),
+		Env:             workEnv(p, sb, mcpToken, h.PreviewURL(p, sb)),
 		WorkDir:         WorkspaceDir,
 		Init:            true,
 		CapDrop:         []string{"ALL"},
@@ -440,11 +480,12 @@ func WorkSpec(p db.Project, sb db.Sandbox, cmd []string, mcpToken string) podman
 			{Name: CodeVolume(sb.ID), Dest: WorkspaceDir},
 			{Name: HomeVolume(p.ID), Dest: HomeDir},
 		},
+		Mounts: mounts,
 	}
 }
 
 // workEnv is the workspace container's environment (plan section 3.4).
-func workEnv(p db.Project, sb db.Sandbox, mcpToken string) map[string]string {
+func workEnv(p db.Project, sb db.Sandbox, mcpToken, previewURL string) map[string]string {
 	env := map[string]string{
 		"WSM_PROJECT": p.Slug,
 		"WSM_SANDBOX": sb.Slug,
@@ -452,6 +493,9 @@ func workEnv(p db.Project, sb db.Sandbox, mcpToken string) map[string]string {
 	}
 	if sb.Branch != "" {
 		env["WSM_BRANCH"] = sb.Branch
+	}
+	if previewURL != "" {
+		env["WSM_PREVIEW_URL"] = previewURL
 	}
 	if mcpToken != "" {
 		env["WSM_MCP_URL"] = mcptoken.URL(sb.ID)
@@ -462,14 +506,21 @@ func workEnv(p db.Project, sb db.Sandbox, mcpToken string) map[string]string {
 
 // PodSpec returns the pod for a sandbox: pasta networking and a keep-id
 // user namespace at pod level that maps ContainerUID to the project user.
+// A sandbox with a host port publishes the project's app port there, on
+// 127.0.0.1 only (plan section 3.3).
 func PodSpec(p db.Project, sb db.Sandbox) podman.PodSpec {
-	return podman.PodSpec{
+	spec := podman.PodSpec{
 		Name:     PodName(sb.ID),
 		Labels:   labels(p, sb),
 		Userns:   &podman.Namespace{Mode: "keep-id", Value: fmt.Sprintf("uid=%d,gid=%d", ContainerUID, ContainerGID)},
 		Netns:    &podman.Namespace{Mode: "pasta"},
 		Hostname: sb.Slug,
 	}
+	if p.AppPort > 0 && sb.HostPort > 0 {
+		spec.PortMappings = []podman.PortMapping{{HostIP: "127.0.0.1", HostPort: uint16(sb.HostPort),
+			ContainerPort: uint16(p.AppPort), Protocol: "tcp"}}
+	}
+	return spec
 }
 
 func labels(p db.Project, sb db.Sandbox) map[string]string {
@@ -497,6 +548,11 @@ func (m *Manager) CreateSandbox(ctx context.Context, projectSlug, slug string) (
 	sb := db.Sandbox{ProjectID: p.ID, Slug: slug, Status: db.StatusCreated, MCPTokenHash: tokenHash}
 	if p.HasRepo() {
 		sb.Branch = SandboxBranch(slug)
+	}
+	if p.AppPort > 0 {
+		if sb.HostPort, err = m.Store.FreeHostPort(ctx); err != nil {
+			return db.Sandbox{}, err
+		}
 	}
 	if err := m.Store.CreateSandbox(ctx, &sb, PodName); err != nil {
 		return sb, err
@@ -537,7 +593,7 @@ func (m *Manager) createPodman(ctx context.Context, pc *podman.Client, p db.Proj
 	if _, err := pc.PodCreate(ctx, PodSpec(p, sb)); err != nil {
 		return err
 	}
-	if _, err := pc.ContainerCreate(ctx, WorkSpec(p, sb, workCommand(cfg), mcpToken)); err != nil {
+	if _, err := pc.ContainerCreate(ctx, WorkSpec(p, sb, workCommand(cfg), mcpToken, m.Host)); err != nil {
 		return err
 	}
 	return nil

@@ -1,0 +1,36 @@
+# Example Caddy configuration for wsm (plan section 7). Copy it to
+# /etc/caddy/Caddyfile and replace the domains.
+#
+# - dash.example.com points to this server; the dashboard listens on
+#   127.0.0.1:8080 (--dashboard-host dash.example.com).
+# - *.example-preview.net points to this server; the preview proxy listens
+#   on 127.0.0.1:8081 (--preview-domain example-preview.net). A separate
+#   registrable domain keeps sandbox content away from dashboard cookies
+#   (ADR 0017).
+#
+# A wildcard certificate needs the DNS-01 challenge, which needs a Caddy
+# build with your DNS provider's module. On a private network, "tls internal"
+# with Caddy's root CA installed on your devices works too.
+
+dash.example.com {
+	reverse_proxy 127.0.0.1:8080
+}
+
+*.example-preview.net {
+	tls {
+		dns <provider> <credentials>
+	}
+	reverse_proxy 127.0.0.1:8081
+}
+
+# Without a DNS provider, on a private network:
+#
+# dash.wsm.lan {
+# 	tls internal
+# 	reverse_proxy 127.0.0.1:8080
+# }
+#
+# *.wsm-preview.lan {
+# 	tls internal
+# 	reverse_proxy 127.0.0.1:8081
+# }

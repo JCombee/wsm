@@ -262,3 +262,40 @@ func (l *Log) Verify(ctx context.Context) (int64, error) {
 	}
 	return n, nil
 }
+
+// List returns at most limit events, newest first, with seq below before
+// (all when before is 0), optionally only those of one sandbox.
+func (l *Log) List(ctx context.Context, before int64, limit int, sandboxID string) ([]Record, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	q := `SELECT seq, ts, actor, sandbox_id, tool, args_json, result, detail, prev_hash, hash
+		FROM audit_events WHERE 1 = 1`
+	var args []any
+	if before > 0 {
+		q += ` AND seq < ?`
+		args = append(args, before)
+	}
+	if sandboxID != "" {
+		q += ` AND sandbox_id = ?`
+		args = append(args, sandboxID)
+	}
+	q += ` ORDER BY seq DESC LIMIT ?`
+	args = append(args, limit)
+	rows, err := l.DB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("audit: list: %w", err)
+	}
+	defer rows.Close()
+	out := []Record{}
+	for rows.Next() {
+		var r Record
+		var sb sql.NullString
+		if err := rows.Scan(&r.Seq, &r.TS, &r.Actor, &sb, &r.Tool, &r.ArgsJSON, &r.Result, &r.Detail, &r.PrevHash, &r.Hash); err != nil {
+			return nil, fmt.Errorf("audit: list: %w", err)
+		}
+		r.SandboxID = sb.String
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}

@@ -4,7 +4,7 @@
 #
 #   deploy/install.sh [--bin DIR] [--admin USER] [--no-packages]
 #
-#   --bin DIR      directory with the wsm and wsm-helper binaries (default:
+#   --bin DIR      directory with the wsm, wsm-helper and wsm-fs binaries (default:
 #                  ../bin next to this script)
 #   --admin USER   add USER to group wsm-admin, so it can use the wsm CLI
 #   --no-packages  do not install the required Debian packages
@@ -44,7 +44,7 @@ if [[ $EUID -ne 0 ]]; then
 	echo "install.sh: must run as root" >&2
 	exit 1
 fi
-for f in wsm wsm-helper; do
+for f in wsm wsm-helper wsm-fs; do
 	if [[ ! -x $BIN_SRC/$f ]]; then
 		echo "install.sh: $BIN_SRC/$f is missing; run make build first" >&2
 		exit 1
@@ -94,6 +94,17 @@ install -d -m 0755 -o root -g root /etc/containers/systemd/users/"$SVC_UID"
 log "installing binaries"
 install -m 0755 -o root -g root "$BIN_SRC/wsm" /usr/local/bin/wsm
 install -m 0755 -o root -g root "$BIN_SRC/wsm-helper" /usr/local/bin/wsm-helper
+# wsm-fs is mounted read-only into every sandbox at /opt/wsm/bin; the
+# directory holds nothing else (CLAUDE.md invariant 1).
+install -d -m 0755 -o root -g root /usr/local/lib/wsm/bin
+install -m 0755 -o root -g root "$BIN_SRC/wsm-fs" /usr/local/lib/wsm/bin/wsm-fs
+
+# Dashboard and preview settings. The file is created once and then left
+# to the administrator.
+install -d -m 0755 /etc/wsm
+if [[ ! -e /etc/wsm/wsm.env ]]; then
+	install -m 0644 "$HERE/wsm.env.example" /etc/wsm/wsm.env
+fi
 
 log "installing systemd units"
 install -d -m 0755 /etc/systemd/system/user@.service.d

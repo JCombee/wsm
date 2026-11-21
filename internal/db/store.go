@@ -45,6 +45,9 @@ type Project struct {
 	CPUMillis     int64 // CPU limit per sandbox in millicores
 	MemBytes      int64 // memory limit per sandbox in bytes
 	PidsLimit     int64 // process limit per sandbox
+	// AppPort is the port the app listens on in the pod; 0 means the
+	// project has no preview (ADR 0017).
+	AppPort int
 	// RepoURL is the project's SSH repository; empty when it has none.
 	// BaseBranch and DeployKeyPub are set exactly when RepoURL is.
 	RepoURL      string
@@ -133,6 +136,9 @@ type Sandbox struct {
 	// lowercase hex (ADR 0012). The token itself is never stored. It is
 	// empty for sandboxes from before migration 00005.
 	MCPTokenHash string
+	// HostPort is where the pod publishes the project's app port on
+	// 127.0.0.1; 0 when the sandbox has no preview.
+	HostPort int
 }
 
 // Store reads and writes projects, sandboxes and jobs.
@@ -207,12 +213,12 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO projects (id, slug, name, linux_user, linux_uid, image_source,
 			image_ref, containerfile, cpu_limit, mem_limit, pids_limit, created_at,
-			repo_url, base_branch, deploy_key_pub, deploy_key_priv_enc)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			repo_url, base_branch, deploy_key_pub, deploy_key_priv_enc, app_port)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.ID, p.Slug, p.Name, p.LinuxUser, p.LinuxUID, p.ImageSource,
 		p.ImageRef, nullString(p.Containerfile), p.CPUMillis, p.MemBytes, p.PidsLimit,
 		formatTime(p.CreatedAt), nullString(p.RepoURL), nullString(p.BaseBranch),
-		nullString(p.DeployKeyPub), nullBytes(p.DeployKeySealed))
+		nullString(p.DeployKeyPub), nullBytes(p.DeployKeySealed), nullInt(p.AppPort))
 	if err != nil {
 		return fmt.Errorf("create project %q: %w", p.Slug, mapErr(err))
 	}
@@ -224,6 +230,8 @@ func (s *Store) CreateProject(ctx context.Context, p *Project, userName func(uid
 
 func nullString(s string) sql.NullString { return sql.NullString{String: s, Valid: s != ""} }
 
+func nullInt(n int) sql.NullInt64 { return sql.NullInt64{Int64: int64(n), Valid: n != 0} }
+
 func nullBytes(b []byte) any {
 	if len(b) == 0 {
 		return nil
@@ -233,17 +241,19 @@ func nullBytes(b []byte) any {
 
 const projectColumns = `id, slug, name, linux_user, linux_uid, image_source, image_ref,
 	containerfile, cpu_limit, mem_limit, pids_limit, created_at,
-	repo_url, base_branch, deploy_key_pub`
+	repo_url, base_branch, deploy_key_pub, app_port`
 
 func scanProject(row interface{ Scan(...any) error }) (Project, error) {
 	var p Project
 	var created string
 	var containerfile, repo, branch, pub sql.NullString
+	var appPort sql.NullInt64
 	if err := row.Scan(&p.ID, &p.Slug, &p.Name, &p.LinuxUser, &p.LinuxUID, &p.ImageSource,
 		&p.ImageRef, &containerfile, &p.CPUMillis, &p.MemBytes, &p.PidsLimit, &created,
-		&repo, &branch, &pub); err != nil {
+		&repo, &branch, &pub, &appPort); err != nil {
 		return p, mapErr(err)
 	}
+	p.AppPort = int(appPort.Int64)
 	p.Containerfile = containerfile.String
 	p.RepoURL, p.BaseBranch, p.DeployKeyPub = repo.String, branch.String, pub.String
 	t, err := parseTime(created)
@@ -336,10 +346,10 @@ func (s *Store) CreateSandbox(ctx context.Context, sb *Sandbox, podName func(id 
 	}
 	_, err = s.DB.ExecContext(ctx, `
 		INSERT INTO sandboxes (id, project_id, slug, status, pod_name, created_at, branch,
-			mcp_token_hash)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			mcp_token_hash, host_port)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sb.ID, sb.ProjectID, sb.Slug, sb.Status, sb.PodName, formatTime(sb.CreatedAt),
-		nullString(sb.Branch), nullString(sb.MCPTokenHash))
+		nullString(sb.Branch), nullString(sb.MCPTokenHash), nullInt(sb.HostPort))
 	if err != nil {
 		return fmt.Errorf("create sandbox %q: %w", sb.Slug, mapErr(err))
 	}
@@ -347,16 +357,18 @@ func (s *Store) CreateSandbox(ctx context.Context, sb *Sandbox, podName func(id 
 }
 
 const sandboxColumns = `id, project_id, slug, status, pod_name, created_at, last_activity_at,
-	branch, seeded_at, mcp_token_hash`
+	branch, seeded_at, mcp_token_hash, host_port`
 
 func scanSandbox(row interface{ Scan(...any) error }) (Sandbox, error) {
 	var sb Sandbox
 	var created string
 	var activity, branch, seeded, tokenHash sql.NullString
+	var hostPort sql.NullInt64
 	if err := row.Scan(&sb.ID, &sb.ProjectID, &sb.Slug, &sb.Status, &sb.PodName,
-		&created, &activity, &branch, &seeded, &tokenHash); err != nil {
+		&created, &activity, &branch, &seeded, &tokenHash, &hostPort); err != nil {
 		return sb, mapErr(err)
 	}
+	sb.HostPort = int(hostPort.Int64)
 	sb.Branch = branch.String
 	sb.MCPTokenHash = tokenHash.String
 	if seeded.Valid {
@@ -577,4 +589,31 @@ func (s *Store) JobsFor(ctx context.Context, refID string) ([]Job, error) {
 		out = append(out, j)
 	}
 	return out, rows.Err()
+}
+
+// The range of host ports on 127.0.0.1 where sandbox pods publish their
+// app port for the preview proxy.
+const (
+	HostPortMin = 47000
+	HostPortMax = 48999
+)
+
+// FreeHostPort returns the lowest port in HostPortMin-HostPortMax that no
+// sandbox uses. The caller serializes sandbox creation; the unique index on
+// host_port catches a race.
+func (s *Store) FreeHostPort(ctx context.Context) (int, error) {
+	var port sql.NullInt64
+	err := s.DB.QueryRowContext(ctx, `
+		SELECT MIN(p) FROM (
+			SELECT ? AS p
+			UNION ALL SELECT host_port + 1 FROM sandboxes WHERE host_port IS NOT NULL
+		) WHERE p <= ? AND p NOT IN (SELECT host_port FROM sandboxes WHERE host_port IS NOT NULL)`,
+		HostPortMin, HostPortMax).Scan(&port)
+	if err != nil {
+		return 0, fmt.Errorf("allocate host port: %w", err)
+	}
+	if !port.Valid {
+		return 0, fmt.Errorf("allocate host port: no free port in %d-%d", HostPortMin, HostPortMax)
+	}
+	return int(port.Int64), nil
 }

@@ -15,6 +15,7 @@ import (
 
 	"github.com/coder/websocket"
 
+	"github.com/JCombee/wsm/internal/audit"
 	"github.com/JCombee/wsm/internal/broker"
 	"github.com/JCombee/wsm/internal/db"
 	"github.com/JCombee/wsm/internal/sandbox"
@@ -48,9 +49,11 @@ type Project struct {
 	MemBytes  int64  `json:"mem_bytes"`
 	PidsLimit int64  `json:"pids_limit"`
 	// RepoURL and BaseBranch are empty for a project without a repository.
-	RepoURL    string    `json:"repo_url,omitempty"`
-	BaseBranch string    `json:"base_branch,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	RepoURL    string `json:"repo_url,omitempty"`
+	BaseBranch string `json:"base_branch,omitempty"`
+	// AppPort is the app's port in the pod; 0 means no preview.
+	AppPort   int       `json:"app_port,omitempty"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // DeployKey is the response of GET /v1/projects/{project}/key: the public
@@ -67,8 +70,10 @@ type Sandbox struct {
 	Status  string `json:"status"`
 	Pod     string `json:"pod"`
 	// Branch is agent/<slug> in a project with a repository.
-	Branch    string    `json:"branch,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	Branch string `json:"branch,omitempty"`
+	// PreviewURL is the sandbox's preview, when it has one.
+	PreviewURL string    `json:"preview_url,omitempty"`
+	CreatedAt  time.Time `json:"created_at"`
 }
 
 // CreateProjectRequest is the body of POST /v1/projects. It has either an
@@ -84,6 +89,7 @@ type CreateProjectRequest struct {
 	// RepoURL is an SSH repository; BaseBranch defaults to main.
 	RepoURL    string `json:"repo_url,omitempty"`
 	BaseBranch string `json:"base_branch,omitempty"`
+	AppPort    int    `json:"app_port,omitempty"`
 }
 
 // ProjectImage is the response of POST /v1/projects/{project}/image.
@@ -109,7 +115,12 @@ type Server struct {
 	Broker *broker.Broker
 	// UserName derives a project's Linux user name from its UID.
 	UserName func(uid int) string
-	Logf     func(format string, args ...any)
+	// Audit is read by GET /v1/audit; nil disables it.
+	Audit *audit.Log
+	// Enroll creates a one-time passkey registration link; nil disables
+	// POST /v1/auth/enroll.
+	Enroll func(ctx context.Context) (string, time.Time, error)
+	Logf   func(format string, args ...any)
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -136,6 +147,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/projects/{project}/sandboxes/{sandbox}/stop", s.stopSandbox)
 	mux.HandleFunc("DELETE /v1/projects/{project}/sandboxes/{sandbox}", s.deleteSandbox)
 	mux.HandleFunc("GET /v1/projects/{project}/sandboxes/{sandbox}/terminal", s.terminal)
+	mux.HandleFunc("GET /v1/projects/{project}/sandboxes/{sandbox}/files/{op}", s.files)
+	mux.HandleFunc("PUT /v1/projects/{project}/sandboxes/{sandbox}/files/content", s.writeFile)
+	mux.HandleFunc("GET /v1/projects/{project}/sandboxes/{sandbox}/services", s.sandboxServices)
+	mux.HandleFunc("DELETE /v1/projects/{project}/sandboxes/{sandbox}/services/{block}", s.revokeService)
+	mux.HandleFunc("GET /v1/audit", s.listAudit)
+	mux.HandleFunc("POST /v1/auth/enroll", s.enroll)
 	return mux
 }
 
@@ -149,12 +166,16 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, err error) {
 	status := http.StatusInternalServerError
 	switch {
+	case errors.Is(err, errUnavailable):
+		status = http.StatusNotImplemented
 	case errors.Is(err, sandbox.ErrInvalid):
 		status = http.StatusBadRequest
 	case errors.Is(err, db.ErrNotFound):
 		status = http.StatusNotFound
 	case errors.Is(err, db.ErrConflict), errors.Is(err, sandbox.ErrState), errors.Is(err, broker.ErrConflict):
 		status = http.StatusConflict
+	case errors.Is(err, sandbox.ErrFS):
+		status = http.StatusUnprocessableEntity
 	}
 	s.logf("%s %s: %d: %v", r.Method, r.URL.Path, status, err)
 	writeJSON(w, status, Error{Error: err.Error()})
@@ -185,13 +206,13 @@ func toProject(p db.Project) Project {
 	return Project{
 		ID: p.ID, Slug: p.Slug, Name: p.Name, LinuxUser: p.LinuxUser, LinuxUID: p.LinuxUID,
 		ImageSource: p.ImageSource, Image: sandbox.ProjectImage(p), CPUMillis: p.CPUMillis, MemBytes: p.MemBytes, PidsLimit: p.PidsLimit,
-		RepoURL: p.RepoURL, BaseBranch: p.BaseBranch, CreatedAt: p.CreatedAt,
+		RepoURL: p.RepoURL, BaseBranch: p.BaseBranch, AppPort: p.AppPort, CreatedAt: p.CreatedAt,
 	}
 }
 
-func toSandbox(projectSlug string, sb db.Sandbox) Sandbox {
-	return Sandbox{ID: sb.ID, Project: projectSlug, Slug: sb.Slug, Status: sb.Status,
-		Pod: sb.PodName, Branch: sb.Branch, CreatedAt: sb.CreatedAt}
+func (s *Server) toSandbox(p db.Project, sb db.Sandbox) Sandbox {
+	return Sandbox{ID: sb.ID, Project: p.Slug, Slug: sb.Slug, Status: sb.Status,
+		Pod: sb.PodName, Branch: sb.Branch, PreviewURL: s.Manager.Host.PreviewURL(p, sb), CreatedAt: sb.CreatedAt}
 }
 
 func (s *Server) listProjects(w http.ResponseWriter, r *http.Request) {
@@ -216,7 +237,7 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 	p, err := s.Manager.CreateProject(r.Context(), sandbox.ProjectSpec{
 		Slug: req.Slug, Name: req.Name, ImageRef: req.Image, Containerfile: req.Containerfile,
 		CPUMillis: req.CPUMillis, MemBytes: req.MemBytes, PidsLimit: req.PidsLimit,
-		RepoURL: req.RepoURL, BaseBranch: req.BaseBranch,
+		RepoURL: req.RepoURL, BaseBranch: req.BaseBranch, AppPort: req.AppPort,
 	}, s.UserName)
 	if err != nil {
 		s.writeError(w, r, err)
@@ -261,18 +282,18 @@ func (s *Server) listSandboxes(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	slugs := map[string]string{}
+	projects := map[string]db.Project{}
 	ps, err := s.Manager.Projects(ctx)
 	if err != nil {
 		s.writeError(w, r, err)
 		return
 	}
 	for _, p := range ps {
-		slugs[p.ID] = p.Slug
+		projects[p.ID] = p
 	}
 	out := make([]Sandbox, 0, len(sbs))
 	for _, sb := range sbs {
-		out = append(out, toSandbox(slugs[sb.ProjectID], sb))
+		out = append(out, s.toSandbox(projects[sb.ProjectID], sb))
 	}
 	writeJSON(w, http.StatusOK, out)
 }
@@ -289,7 +310,12 @@ func (s *Server) createSandbox(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, toSandbox(project, sb))
+	p, err := s.Manager.Store.ProjectByID(r.Context(), sb.ProjectID)
+	if err != nil {
+		s.writeError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.toSandbox(p, sb))
 }
 
 func (s *Server) sandboxAction(w http.ResponseWriter, r *http.Request,

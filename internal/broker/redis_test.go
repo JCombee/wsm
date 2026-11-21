@@ -56,6 +56,13 @@ func (f *fakePods) EnsureService(ctx context.Context, sandboxID string, blk bloc
 	return ensureErr
 }
 
+func (f *fakePods) RemoveService(_ context.Context, sandboxID, blockID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.ensures = append(f.ensures, "remove "+sandboxID+" "+blockID)
+	return nil
+}
+
 func (f *fakePods) take() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

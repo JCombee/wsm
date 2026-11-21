@@ -108,6 +108,7 @@ func runProject(e env) error {
 		pids := fs.Int64("pids", 0, "process limit per sandbox")
 		repo := fs.String("repo", "", "git repository over SSH: ssh://user@host[:port]/path or user@host:path")
 		branch := fs.String("branch", "", "base branch of the repository (default main)")
+		appPort := fs.Int("app-port", 0, "port the app listens on in the sandbox, for the preview (default: no preview)")
 		if err := fs.Parse(args); err != nil {
 			return usageError{err.Error()}
 		}
@@ -118,7 +119,7 @@ func runProject(e env) error {
 			return usageError{"--branch needs --repo"}
 		}
 		req := api.CreateProjectRequest{Slug: *slug, Name: *name, Image: *image, PidsLimit: *pids,
-			RepoURL: *repo, BaseBranch: *branch}
+			RepoURL: *repo, BaseBranch: *branch, AppPort: *appPort}
 		var err error
 		if *containerfile != "" {
 			if req.Containerfile, err = readContainerfile(*containerfile); err != nil {

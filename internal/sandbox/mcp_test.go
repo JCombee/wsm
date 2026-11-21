@@ -77,7 +77,7 @@ func TestSandboxGetsMCPToken(t *testing.T) {
 }
 
 func TestWorkEnvWithoutToken(t *testing.T) {
-	env := workEnv(db.Project{Slug: "p"}, db.Sandbox{ID: "abcdefgh2345", Slug: "s"}, "")
+	env := workEnv(db.Project{Slug: "p"}, db.Sandbox{ID: "abcdefgh2345", Slug: "s"}, "", "")
 	for _, k := range []string{"WSM_MCP_URL", "WSM_MCP_TOKEN"} {
 		if _, ok := env[k]; ok {
 			t.Errorf("%s set without a token", k)

@@ -10,7 +10,9 @@ Wants=network-online.target
 Type=simple
 User=wsm
 Group=wsm
-ExecStart=/usr/local/bin/wsm serve
+# WSM_SERVE_FLAGS sets the dashboard and preview hosts; see wsm.env.example.
+EnvironmentFile=-/etc/wsm/wsm.env
+ExecStart=/usr/local/bin/wsm serve $WSM_SERVE_FLAGS
 Restart=on-failure
 StateDirectory=wsm
 StateDirectoryMode=0700

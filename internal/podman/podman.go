@@ -198,6 +198,17 @@ type PodSpec struct {
 	Userns   *Namespace        `json:"userns,omitempty"`
 	Netns    *Namespace        `json:"netns,omitempty"`
 	Hostname string            `json:"hostname,omitempty"`
+	// PortMappings publish pod ports on the host. wsm only publishes a
+	// preview port on 127.0.0.1 (plan section 3.3).
+	PortMappings []PortMapping `json:"portmappings,omitempty"`
+}
+
+// PortMapping publishes a container port on a host address and port.
+type PortMapping struct {
+	HostIP        string `json:"host_ip"`
+	HostPort      uint16 `json:"host_port"`
+	ContainerPort uint16 `json:"container_port"`
+	Protocol      string `json:"protocol"`
 }
 
 // Resources is the subset of the OCI LinuxResources wsm sets.
@@ -223,8 +234,9 @@ type PidsLimit struct {
 	Limit int64 `json:"limit"`
 }
 
-// NamedVolume mounts a Podman named volume. There is no type for bind
-// mounts: host paths never go into a sandbox (CLAUDE.md invariant 1).
+// NamedVolume mounts a Podman named volume. Host paths never go into a
+// sandbox (CLAUDE.md invariant 1); the one exception is the read-only
+// wsm-fs helper, see HelperMount.
 type NamedVolume struct {
 	Name    string   `json:"Name"`
 	Dest    string   `json:"Dest"`
@@ -246,11 +258,28 @@ type ContainerSpec struct {
 	NoNewPrivileges bool              `json:"no_new_privileges,omitempty"`
 	Resources       *Resources        `json:"resource_limits,omitempty"`
 	Volumes         []NamedVolume     `json:"volumes,omitempty"`
+	// Mounts holds at most the read-only helper mount (HelperMount).
+	Mounts []Mount `json:"mounts,omitempty"`
 	// ReadOnlyFilesystem mounts the container's root filesystem read-only.
 	ReadOnlyFilesystem bool `json:"read_only_filesystem,omitempty"`
 	// ImageVolumeMode says what to do with the VOLUME entries of the
 	// image; "tmpfs" turns them into tmpfs mounts, so no volume is created.
 	ImageVolumeMode string `json:"image_volume_mode,omitempty"`
+}
+
+// Mount is an OCI mount in a SpecGenerator.
+type Mount struct {
+	Destination string   `json:"destination"`
+	Type        string   `json:"type"`
+	Source      string   `json:"source"`
+	Options     []string `json:"options"`
+}
+
+// HelperMount returns the only host path wsm mounts into a sandbox: the
+// directory with wsm-fs, read-only, at dest (CLAUDE.md invariant 1).
+func HelperMount(source, dest string) Mount {
+	return Mount{Destination: dest, Type: "bind", Source: source,
+		Options: []string{"ro", "nosuid", "nodev", "rbind"}}
 }
 
 type idResponse struct {

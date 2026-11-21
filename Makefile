@@ -12,17 +12,24 @@ export STATICCHECK_CACHE ?= $(shell $(GO) env GOCACHE)/staticcheck
 
 export CGO_ENABLED := 0
 
-.PHONY: build test lint isolation-build isolation-test clean
+.PHONY: build web test lint isolation-build isolation-test clean
 
+# build embeds whatever is in web/dist: the real frontend after "make web",
+# a placeholder page otherwise.
 build:
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/wsm ./cmd/wsm
 	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/wsm-helper ./cmd/wsm-helper
+	$(GO) build -trimpath -ldflags '$(LDFLAGS)' -o bin/wsm-fs ./cmd/wsm-fs
+
+# web builds the dashboard frontend into web/dist (needs Node.js and npm).
+web:
+	cd web && npm ci && npm run build
 
 test:
 	$(GO) test -count=1 ./...
 
 lint:
-	@out=$$(gofmt -l $(wildcard cmd internal test)); \
+	@out=$$(gofmt -l $(wildcard cmd internal test web/*.go)); \
 	if [ -n "$$out" ]; then echo "gofmt needed:"; echo "$$out"; exit 1; fi
 	$(GO) vet -tags isolation ./...
 	$(GO) run $(STATICCHECK) -tags isolation ./...

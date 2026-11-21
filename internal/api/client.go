@@ -202,3 +202,10 @@ func (c *Client) Terminal(ctx context.Context, project, sandbox string, rows, co
 	}
 	return ws, nil
 }
+
+// Enroll creates a one-time passkey registration link.
+func (c *Client) Enroll(ctx context.Context) (EnrollLink, error) {
+	var out EnrollLink
+	err := c.do(ctx, http.MethodPost, "/v1/auth/enroll", nil, &out)
+	return out, err
+}

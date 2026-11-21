@@ -48,6 +48,7 @@ type Helper interface {
 type Pods interface {
 	PullServiceImage(ctx context.Context, projectID string, blk blocks.Block, tag string) error
 	EnsureService(ctx context.Context, sandboxID string, blk blocks.Block, tag string, record func(context.Context) error) error
+	RemoveService(ctx context.Context, sandboxID, blockID string) error
 }
 
 // Service states.

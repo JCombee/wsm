@@ -94,3 +94,15 @@ func (s *Store) SandboxServicesOutsideCeiling(ctx context.Context, projectID, bl
 	}
 	return out, nil
 }
+
+// DeleteSandboxService removes the record of a per-sandbox service.
+func (s *Store) DeleteSandboxService(ctx context.Context, sandboxID, blockID string) error {
+	res, err := s.DB.ExecContext(ctx, `DELETE FROM sandbox_services WHERE sandbox_id = ? AND block_id = ?`, sandboxID, blockID)
+	if err != nil {
+		return fmt.Errorf("delete service %s of sandbox %s: %w", blockID, sandboxID, err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("service %s of sandbox %s: %w", blockID, sandboxID, ErrNotFound)
+	}
+	return nil
+}
