@@ -25,4 +25,5 @@ M4 adds the web dashboard. Plan 3.11 asks for passkey login, a `__Host-` session
 
 - A preview origin can neither use the passkey nor act on the API with the owner's session.
 - Losing every passkey means running `wsm auth enroll` on the server.
-- Isolation tests check the HTTP-level rules against a real install (auth required, origin and CSRF checks, the WebSocket origin). The browser-level passkey behaviour is covered by spike 04; repeating it with chromedp in the isolation tests is left for later.
+- Isolation tests check the rules against a real install: a software passkey drives the real enrol and login ceremonies (and a login whose client data names a preview origin is refused), plus the session requirement, the Origin, Sec-Fetch-Site and CSRF checks, and the WebSocket origin. The browser's own behaviour (RP ID refusal on previews, `__Host-` rules) is covered by spike 04; repeating it with Chromium in the isolation tests is left for later.
+- Sessions and ceremonies: ceremonies live in memory, so a restart of wsm only cancels logins in progress. Expired sessions and tokens are deleted hourly.
