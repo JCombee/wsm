@@ -17,8 +17,9 @@ test("S05 config accepts a valid project", () => {
     [{ project: "a" }, { project: "a", timeoutMs: DEFAULT_TIMEOUT_MS }],
     [{ project: "my-proj-2", timeoutMs: 60000 }, { project: "my-proj-2", timeoutMs: 60000 }],
     [{ project: "a".repeat(32) }, { project: "a".repeat(32), timeoutMs: DEFAULT_TIMEOUT_MS }],
-    // Paperclip's envelope keys, only as false.
+    // Paperclip's envelope keys: reuseLease only false, archiveOnRelease ignored.
     [{ project: "s05", reuseLease: false, archiveOnRelease: false }, { project: "s05", timeoutMs: DEFAULT_TIMEOUT_MS }],
+    [{ project: "s05", reuseLease: false, archiveOnRelease: true }, { project: "s05", timeoutMs: DEFAULT_TIMEOUT_MS }],
   ];
   for (const [raw, want] of cases) assert.deepEqual(parseConfig(raw), want);
 });
@@ -29,7 +30,7 @@ test("S05 config rejects bad slugs and unknown keys", () => {
     { project: "" }, { project: "S05" }, { project: "1abc" }, { project: "abc-" },
     { project: "a".repeat(33) }, { project: "../x" }, { project: "s05/x" }, { project: 5 },
     { project: "s05", extra: 1 }, { project: "s05", apiKey: "x" }, { project: "s05", provider: "wsm" },
-    { project: "s05", reuseLease: true }, { project: "s05", archiveOnRelease: true }, { project: "s05", reuseLease: "false" },
+    { project: "s05", reuseLease: true }, { project: "s05", archiveOnRelease: "yes" }, { project: "s05", reuseLease: "false" },
     { project: "s05", timeoutMs: "5" }, { project: "s05", timeoutMs: 5 }, { project: "s05", timeoutMs: 1.5e3 + 0.5 },
     { project: "s05", timeoutMs: 1e12 },
   ];

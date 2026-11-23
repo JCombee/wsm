@@ -35,7 +35,7 @@ const manifest: PaperclipPluginManifestV1 = {
             default: 900000,
           },
           reuseLease: { type: "boolean", const: false, description: "Leases are always ephemeral." },
-          archiveOnRelease: { type: "boolean", const: false, description: "Sandboxes are deleted on release." },
+          archiveOnRelease: { type: "boolean", description: "Ignored: sandboxes are always deleted on release." },
         },
       },
       sandboxCapabilities: {

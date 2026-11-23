@@ -16,10 +16,11 @@ export interface WsmConfig {
 export class ConfigError extends Error {}
 
 const KNOWN_KEYS = new Set(["project", "timeoutMs"]);
-// Paperclip adds these envelope keys to every sandbox driver config. This
-// provider only has ephemeral leases that are deleted on release, so it takes
-// them only as false.
-const ENVELOPE_FALSE_KEYS = new Set(["reuseLease", "archiveOnRelease"]);
+// Paperclip adds two envelope keys to every sandbox driver config. This
+// provider only has ephemeral leases, so reuseLease must be false.
+// archiveOnRelease is accepted as a boolean and ignored: Paperclip's
+// environment test (the hello probe) always sets it to true, and this provider
+// deletes the sandbox on release either way, which is the safe direction.
 
 function describeKey(key: string): string {
   return JSON.stringify(key.length > 64 ? `${key.slice(0, 64)}…` : key);
@@ -32,8 +33,12 @@ export function parseConfig(raw: unknown): WsmConfig {
   }
   const obj = raw as Record<string, unknown>;
   for (const key of Object.keys(obj)) {
-    if (ENVELOPE_FALSE_KEYS.has(key)) {
-      if (obj[key] !== false) throw new ConfigError(`wsm config.${key} is not supported; it must be false`);
+    if (key === "reuseLease") {
+      if (obj[key] !== false) throw new ConfigError("wsm config.reuseLease is not supported; it must be false");
+      continue;
+    }
+    if (key === "archiveOnRelease") {
+      if (typeof obj[key] !== "boolean") throw new ConfigError("wsm config.archiveOnRelease must be a boolean");
       continue;
     }
     if (!KNOWN_KEYS.has(key)) throw new ConfigError(`wsm config has unknown key ${describeKey(key)}`);
