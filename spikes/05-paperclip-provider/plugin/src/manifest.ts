@@ -34,6 +34,8 @@ const manifest: PaperclipPluginManifestV1 = {
             description: "Default command timeout in milliseconds.",
             default: 900000,
           },
+          reuseLease: { type: "boolean", const: false, description: "Leases are always ephemeral." },
+          archiveOnRelease: { type: "boolean", const: false, description: "Sandboxes are deleted on release." },
         },
       },
       sandboxCapabilities: {

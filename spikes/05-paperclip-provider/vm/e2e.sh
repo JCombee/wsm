@@ -71,7 +71,7 @@ ensure_agent() {
 	if [[ -f $STATE/e2e.env ]]; then
 		# shellcheck disable=SC1091
 		source "$STATE/e2e.env"
-		[[ -n $CID ]] && curl -fsS -o /dev/null "$API/companies/$CID" || CID=
+		[[ -n $CID && -n $EID && -n $AID ]] && curl -fsS -o /dev/null "$API/agents/$AID" || CID=
 	fi
 	[[ -n $CID ]] && return 0
 	log "create company, environment and agent"
@@ -92,6 +92,11 @@ ensure_agent() {
 	code=$(call POST "/companies/$CID/agents" "$STATE/agent.json")
 	AID=$(jq -r '.id // empty' "$RAW/resp.json")
 	info e2e-agent "POST agents -> $code status=$(jq -r .status "$RAW/resp.json")"
+	if [[ -z $CID || -z $EID || -z $AID ]]; then
+		echo "e2e: could not create the company, environment or agent; see the INFO lines" >&2
+		rm -f "$STATE/e2e.env"
+		exit 1
+	fi
 	printf 'CID=%s\nEID=%s\nAID=%s\n' "$CID" "$EID" "$AID" >"$STATE/e2e.env"
 	# A new agent passes a lifecycle check (the hello probe in its environment).
 	local t0
