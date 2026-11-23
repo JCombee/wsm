@@ -41,7 +41,9 @@ bridge_checks() {
 	echo "env-multiline=$(node -e 'console.log(Object.keys(process.env).filter((k) => process.env[k].includes("\n")).sort().join(",") || "none")')"
 	echo "bridge-me=$(api GET /api/agents/me)"
 	echo "bridge-deny=$(api POST "/api/companies/$PAPERCLIP_COMPANY_ID/agents" -H 'Content-Type: application/json' -d '{"name":"s05-must-not-exist","adapterType":"claude_local"}')"
-	echo "bridge-badtoken=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' "$PAPERCLIP_API_URL/api/agents/me" 2>/dev/null)"
+	# Not "...token": Paperclip's log redaction would swallow the value and the
+	# lines after it up to the next space.
+	echo "bridge-forged=$(curl -sS -m 30 -o /dev/null -w '%{http_code}' -H 'Authorization: Bearer wrong' "$PAPERCLIP_API_URL/api/agents/me" 2>/dev/null)"
 	echo "bridge-github=$(api POST /runtime-tools/github/credentials -H 'Content-Type: application/json' -d '{}')"
 	host=$(cat .s05/host 2>/dev/null)
 	net 169.254.1.2-3100 http://169.254.1.2:3100/api/health

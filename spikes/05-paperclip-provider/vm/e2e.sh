@@ -150,6 +150,10 @@ start_listener() {
 	systemctl reset-failed s05-listen 2>/dev/null
 	systemd-run --unit=s05-listen --uid=pclip --gid=pclip /usr/local/bin/node -e \
 		"require('http').createServer((q,s)=>s.end('host-ok')).listen(3199,'0.0.0.0')" >/dev/null
+	for _ in $(seq 1 50); do
+		ss -Hltn 'sport = :3199' | grep -q . && return 0
+		sleep 0.1
+	done
 }
 
 stop_watch() {
@@ -210,7 +214,7 @@ kv() { grep -m1 "^kv $1=" "$OUT/runlog.txt" | cut -d= -f2-; }
 net_probe() {
 	local slug="np-$(head -c 5 /dev/urandom | od -An -tx1 | tr -d ' \n')" puser pod ctr ctl code
 	puser=$(project_user)
-	wsmapi "/projects/$PROJECT/sandboxes" -o "$RAW/np.json" -H 'content-type: application/json' -d "{\"slug\":\"$slug\"}" >/dev/null
+	wsmapi "/projects/$PROJECT/sandboxes" -H 'content-type: application/json' -d "{\"slug\":\"$slug\"}" >"$RAW/np.json"
 	wsmapi "/projects/$PROJECT/sandboxes/$slug/start" -X POST >/dev/null
 	pod=$(jq -r .pod "$RAW/np.json")
 	ctr=$pod-work
@@ -296,7 +300,7 @@ run_ok() { jq -e 'any(.[]; .status == "succeeded")' "$RAW/runs.json" >/dev/null;
 
 check_file() {
 	local me get patch deny bad gh duplex_opens glog
-	me=$(kv bridge-me) get=$(kv issue-get) patch=$(kv issue-patch) deny=$(kv bridge-deny) bad=$(kv bridge-badtoken) gh=$(kv bridge-github)
+	me=$(kv bridge-me) get=$(kv issue-get) patch=$(kv issue-patch) deny=$(kv bridge-deny) bad=$(kv bridge-forged) gh=$(kv bridge-github)
 	duplex_opens=$(grep -c 's05 duplex open' "$OUT/plugin-log.txt")
 	if [[ $(kv ws-head) == "$FIRST" && -n $FIRST ]]; then
 		res SYNC-IN PASS "ws-head=$(kv ws-head) = first commit"
@@ -309,9 +313,9 @@ check_file() {
 		res BRIDGE-FILE FAIL "bridge-me=$me issue-get=$get issue-patch=$patch duplex-opens=$duplex_opens"
 	fi
 	if [[ $deny =~ ^(403|404)$ && $bad =~ ^(401|403)$ ]]; then
-		res BRIDGE-DENY PASS "bridge-deny=$deny bridge-badtoken=$bad"
+		res BRIDGE-DENY PASS "bridge-deny=$deny bridge-forged(bad bearer)=$bad"
 	else
-		res BRIDGE-DENY FAIL "bridge-deny=$deny bridge-badtoken=$bad"
+		res BRIDGE-DENY FAIL "bridge-deny=$deny bridge-forged(bad bearer)=$bad"
 	fi
 	info bridge-github "POST /runtime-tools/github/credentials -> $gh"
 	info env-names "$(kv env-names)"

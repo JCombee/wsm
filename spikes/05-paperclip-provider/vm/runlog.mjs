@@ -22,7 +22,7 @@ function strings(v, out) {
 function takeLines(text) {
   for (const line of text.split("\n")) {
     const m = KEY_RE.exec(line.trim());
-    if (m && !kv.has(m[1])) kv.set(m[1], m[2]);
+    if (m && !kv.has(m[1])) kv.set(m[1], m[2].trim());
     if (line.startsWith("[paperclip]")) pc.push(line.slice(0, 300));
   }
 }
