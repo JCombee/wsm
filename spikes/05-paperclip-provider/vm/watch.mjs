@@ -1,6 +1,8 @@
 // Spike 05 watcher, run as root during a scenario. Every 200 ms it reads all
 // /proc/*/cmdline and looks for the sentinel. It reads the sentinel from a file,
 // so its own argv never holds it. Hits are recorded as pid and comm only.
+// It also records processes whose argv assigns PAPERCLIP_BRIDGE_TOKEN (pid,
+// comm and host uid only), to show where the bridge token is visible in argv.
 // Usage: node watch.mjs <sentinel-file> <out-file>; stop it with SIGTERM.
 import { readFileSync, readdirSync, writeFileSync } from "node:fs";
 
@@ -8,7 +10,19 @@ const [sentinelFile, outFile] = process.argv.slice(2);
 const sentinel = Buffer.from(readFileSync(sentinelFile, "utf8").trim());
 if (sentinel.length < 16) throw new Error("sentinel too short");
 const hits = new Map();
+const bridgeNeedle = Buffer.from("PAPERCLIP_BRIDGE_TOKEN=");
+const bridgeHits = new Map();
 let scans = 0;
+
+function procInfo(name) {
+  let comm = "?";
+  let uid = "?";
+  try {
+    comm = readFileSync(`/proc/${name}/comm`, "utf8").trim();
+    uid = /^Uid:\s+([0-9]+)/m.exec(readFileSync(`/proc/${name}/status`, "utf8"))?.[1] ?? "?";
+  } catch {}
+  return { comm, uid };
+}
 
 function scan() {
   scans++;
@@ -20,18 +34,19 @@ function scan() {
     } catch {
       continue;
     }
-    if (cmd.includes(sentinel)) {
-      let comm = "?";
-      try {
-        comm = readFileSync(`/proc/${name}/comm`, "utf8").trim();
-      } catch {}
-      hits.set(name, comm);
-    }
+    if (cmd.includes(sentinel)) hits.set(name, procInfo(name).comm);
+    if (cmd.includes(bridgeNeedle) && !bridgeHits.has(name)) bridgeHits.set(name, procInfo(name));
   }
 }
 
 function finish() {
-  const lines = [`scans=${scans}`, `hits=${hits.size}`, ...[...hits].map(([pid, comm]) => `hit pid=${pid} comm=${comm}`)];
+  const lines = [
+    `scans=${scans}`,
+    `hits=${hits.size}`,
+    ...[...hits].map(([pid, comm]) => `hit pid=${pid} comm=${comm}`),
+    `bridge-hits=${bridgeHits.size}`,
+    ...[...bridgeHits].map(([pid, { comm, uid }]) => `bridge-hit pid=${pid} comm=${comm} uid=${uid}`),
+  ];
   writeFileSync(outFile, `${lines.join("\n")}\n`);
   process.exit(0);
 }

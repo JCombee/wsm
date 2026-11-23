@@ -259,6 +259,7 @@ check_secrets() {
 	else
 		res_sticky SECRETS-ARGV FAIL "watcher hits=$hits: $(grep '^hit ' "$OUT/watcher.txt" | tr '\n' ' ')"
 	fi
+	info "bridge-token-argv-$sc" "$(grep -E '^bridge-hit' "$OUT/watcher.txt" | sort -u -k3 | head -6 | tr '\n' ' ')$(grep -oE '^bridge-hits=[0-9]+' "$OUT/watcher.txt") (pclip uid=$(id -u pclip))"
 	journalctl -u s05-paperclip --no-pager -o cat | grep -F '[plugin]' | grep -qF -f "$SENTINEL_FILE" && sentinel_in_plugin=1
 	grep -rqF -f "$SENTINEL_FILE" "$RESULTS" && sentinel_in_results=1
 	if ((sentinel_in_plugin == 0 && sentinel_in_results == 0)); then
@@ -342,14 +343,18 @@ check_file() {
 }
 
 check_duplex() {
-	local me get patch opens glog
+	local me get patch opens fallback glog
 	me=$(kv bridge-me) get=$(kv issue-get) patch=$(kv issue-patch)
 	opens=$(grep -c 's05 duplex open' "$OUT/plugin-log.txt")
-	if ((opens > 0)) && [[ $me == 200 && $get == 200 && $patch == 200 ]]; then
-		res BRIDGE-DUPLEX PASS "duplex-opens=$opens bridge-me=$me issue-get=$get issue-patch=$patch"
+	# Paperclip falls back to the file bridge when the channel does not open or
+	# never becomes ready; a 200 then proves nothing about duplex.
+	fallback=$(grep -ohE '(Could not open the sandbox duplex channel|Sandbox duplex readiness failed) \([a-z_]+\)' "$RAW"/log-*.json 2>/dev/null | sort -u | tr '\n' ' ')
+	if ((opens > 0)) && [[ -z $fallback && $me == 200 && $get == 200 && $patch == 200 ]]; then
+		res BRIDGE-DUPLEX PASS "duplex-opens=$opens fallback=none bridge-me=$me issue-get=$get issue-patch=$patch"
 	else
-		res BRIDGE-DUPLEX FAIL "duplex-opens=$opens bridge-me=$me issue-get=$get issue-patch=$patch"
+		res BRIDGE-DUPLEX FAIL "duplex-opens=$opens fallback=${fallback:-none} bridge-me=$me issue-get=$get issue-patch=$patch"
 	fi
+	info duplex-lines "$(grep -oE 's05 duplex (exit|terminate|close|stderr|client|output) .{0,160}' "$OUT/plugin-log.txt" | head -6 | tr '\n' ' ')"
 	glog=$(as_pc git -C "$REPO" log --format=%s -5 | tr '\n' '|')
 	if run_ok && [[ $ISSUE_STATUS == done ]] && grep -q "S1 spike commit from the sandbox (duplex)" <<<"$glog"; then
 		res RESTORE-DUPLEX PASS "run succeeded, issue done, host git log: $glog"

@@ -91,6 +91,11 @@ export class Sandboxes {
     return sb ? "active" : "destroyed";
   }
 
+  /** cached returns a lease this worker acquired or resolved, or null. */
+  cached(leaseId: unknown): ResolvedLease | null {
+    return typeof leaseId === "string" ? (this.cache.get(leaseId) ?? null) : null;
+  }
+
   forget(leaseId: string): void {
     this.cache.delete(leaseId);
   }

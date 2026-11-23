@@ -42,7 +42,7 @@ const manifest: PaperclipPluginManifestV1 = {
         reusableLeases: false,
         nativeSyncIn: true,
         nativeSyncOut: true,
-        duplexCommandStream: false,
+        duplexCommandStream: true,
       },
     },
   ],

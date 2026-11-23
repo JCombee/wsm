@@ -1,6 +1,6 @@
 // The wsm sandbox provider: one ephemeral wsm sandbox per Paperclip lease,
 // commands over `podman --remote exec` on the project's socket.
-import { definePlugin, type PluginContext } from "@paperclipai/plugin-sdk";
+import { decodeChannelBytes, definePlugin, type PluginContext } from "@paperclipai/plugin-sdk";
 import type {
   PluginEnvironmentAcquireLeaseParams,
   PluginEnvironmentDestroyLeaseParams,
@@ -24,6 +24,7 @@ import type {
 } from "@paperclipai/plugin-sdk";
 import { AdminClient } from "./admin.ts";
 import { parseConfig as parseStrict, type WsmConfig } from "./config.ts";
+import { DuplexChannels } from "./duplex.ts";
 import { describe, runExec, type ExecLog, type ExecSpec } from "./exec.ts";
 import { Sandboxes } from "./sandboxes.ts";
 import { syncIn, syncOut, type SyncContext } from "./sync.ts";
@@ -42,6 +43,19 @@ const log: ExecLog = {
 };
 
 const sandboxes = new Sandboxes(new AdminClient(), log);
+const duplex = new DuplexChannels({
+  sink: {
+    data(hostRouteId, workerSessionId, chunk) {
+      pluginContext?.duplexChannel.data(hostRouteId, workerSessionId, chunk);
+    },
+    exit(hostRouteId, workerSessionId, exitCode, transportClosed) {
+      if (transportClosed === undefined) pluginContext?.duplexChannel.exit(hostRouteId, workerSessionId, exitCode);
+      else pluginContext?.duplexChannel.exit(hostRouteId, workerSessionId, exitCode, transportClosed);
+    },
+  },
+  log,
+  cwd: WORKSPACE_DIR,
+});
 const seenExtraKeys = new Set<string>();
 
 /** parseConfig parses the host-built config of a lease or exec hook. */
@@ -77,6 +91,7 @@ async function syncContext(params: PluginEnvironmentSyncInParams | PluginEnviron
 async function release(params: PluginEnvironmentReleaseLeaseParams, hook: string): Promise<PluginEnvironmentTerminationReceipt | void> {
   if (params.providerLeaseId === null) return;
   const cfg = parseConfig(params.config);
+  duplex.closeLease(params.providerLeaseId);
   await sandboxes.release(params.providerLeaseId, cfg.project, hook);
   return { providerLeaseId: params.providerLeaseId, state: "destroyed" };
 }
@@ -186,6 +201,35 @@ const plugin = definePlugin({
   async onEnvironmentSyncOut(params: PluginEnvironmentSyncOutParams): Promise<PluginEnvironmentSyncResult> {
     const ctx = await syncContext(params, "sync-out");
     return { operations: await syncOut(ctx, params.operations) };
+  },
+
+  // Duplex bridge: one `podman exec -i` per host route (duplex.ts). The open
+  // params carry no driver config, so only a lease this worker acquired or
+  // resolved before can open a channel.
+  async onDuplexChannelOpen(params) {
+    if (params.driverKey !== "wsm") throw new Error("wsm duplex channel: unexpected driver key");
+    const lease = sandboxes.cached(params.providerLeaseId);
+    if (!lease) throw new Error("wsm duplex channel: no lease of this worker matches the provider lease id");
+    return duplex.open(params, lease);
+  },
+
+  // Writes arrive as base64; a malformed or empty frame applies no bytes.
+  async onDuplexChannelWrite(params) {
+    const data = decodeChannelBytes(params.data);
+    if (data === null) return;
+    await duplex.write(params.hostRouteId, params.workerSessionId, data);
+  },
+
+  async onDuplexChannelStop(params) {
+    await duplex.stop(params.hostRouteId, params.workerSessionId);
+  },
+
+  async onDuplexChannelClose(params) {
+    return await duplex.close(params.hostRouteId);
+  },
+
+  async onShutdown() {
+    await duplex.closeAll();
   },
 });
 
