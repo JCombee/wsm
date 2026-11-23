@@ -11,6 +11,7 @@
 //   podman client leaves the process in the container running.
 // - stdout and stderr are capped (invariant 8).
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Readable } from "node:stream";
 import os from "node:os";
 import path from "node:path";
 
@@ -147,7 +148,7 @@ export function describe(spec: ExecSpec): string {
 }
 
 export interface RunOptions {
-  stdin?: string | Buffer;
+  stdin?: string | Buffer | Readable;
   outputLimit?: number;
   log?: ExecLog;
 }
@@ -212,6 +213,72 @@ export function runExec(spec: ExecSpec, opts: RunOptions = {}): Promise<ExecResu
         durationMs,
       });
     });
-    if (child.stdin) child.stdin.end(opts.stdin ?? "");
+    feedStdin(child, opts.stdin);
   });
+}
+
+function feedStdin(child: ChildProcess, stdin: string | Buffer | Readable | undefined): void {
+  if (!child.stdin) return;
+  if (stdin === undefined || typeof stdin === "string" || Buffer.isBuffer(stdin)) {
+    child.stdin.end(stdin ?? "");
+    return;
+  }
+  stdin.on("error", () => child.kill("SIGKILL"));
+  stdin.pipe(child.stdin);
+}
+
+export interface StreamingExec {
+  /** The command's stdout, for the caller to consume. */
+  stdout: Readable;
+  /** Resolves when the client exits, with the capped stderr. */
+  done: Promise<ExecResult>;
+  kill(): void;
+}
+
+/**
+ * runStreaming runs a command whose stdout the caller reads as a stream (a tar
+ * archive). stderr is capped; the in-container timeout and the client guard
+ * apply as in runExec.
+ */
+export function runStreaming(spec: ExecSpec, opts: { stdin?: Readable | Buffer; stderrLimit?: number; log?: ExecLog } = {}): StreamingExec {
+  const log = opts.log ?? silentLog;
+  const limit = opts.stderrLimit ?? 1 << 20;
+  const { child, startedAt } = startExec({ ...spec, interactive: opts.stdin !== undefined });
+  const kill = () => {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  };
+  const done = new Promise<ExecResult>((resolve, reject) => {
+    const err: Buffer[] = [];
+    let errSize = 0;
+    let clientKilled = false;
+    const guard = setTimeout(() => {
+      clientKilled = true;
+      log.warn(`s05 exec client killed: no exit ${CLIENT_GRACE_MS} ms after the in-container timeout`);
+      kill();
+    }, spec.timeoutMs + CLIENT_GRACE_MS);
+    child.stderr?.on("data", (c: Buffer) => {
+      errSize += c.length;
+      if (errSize <= limit) err.push(c);
+    });
+    child.on("error", (e) => {
+      clearTimeout(guard);
+      reject(new ExecError(`podman client failed to start: ${e.message}`));
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(guard);
+      const durationMs = Date.now() - startedAt;
+      const inContainerTimeout = (code === 124 || code === 137) && durationMs >= spec.timeoutMs - 500;
+      resolve({
+        exitCode: clientKilled ? null : code,
+        signal: signal ?? null,
+        timedOut: clientKilled || inContainerTimeout,
+        stdout: Buffer.alloc(0),
+        stderr: Buffer.concat(err),
+        durationMs,
+      });
+    });
+  });
+  feedStdin(child, opts.stdin);
+  if (!child.stdout) throw new ExecError("podman client has no stdout");
+  return { stdout: child.stdout, done, kill };
 }

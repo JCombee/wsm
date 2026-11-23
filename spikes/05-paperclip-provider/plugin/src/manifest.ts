@@ -40,8 +40,8 @@ const manifest: PaperclipPluginManifestV1 = {
       },
       sandboxCapabilities: {
         reusableLeases: false,
-        nativeSyncIn: false,
-        nativeSyncOut: false,
+        nativeSyncIn: true,
+        nativeSyncOut: true,
         duplexCommandStream: false,
       },
     },

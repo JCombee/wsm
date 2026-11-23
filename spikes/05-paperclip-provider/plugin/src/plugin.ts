@@ -15,6 +15,9 @@ import type {
   PluginEnvironmentRealizeWorkspaceResult,
   PluginEnvironmentReleaseLeaseParams,
   PluginEnvironmentResumeLeaseParams,
+  PluginEnvironmentSyncInParams,
+  PluginEnvironmentSyncOutParams,
+  PluginEnvironmentSyncResult,
   PluginEnvironmentTerminationReceipt,
   PluginEnvironmentValidateConfigParams,
   PluginEnvironmentValidationResult,
@@ -23,6 +26,7 @@ import { AdminClient } from "./admin.ts";
 import { parseConfig as parseStrict, type WsmConfig } from "./config.ts";
 import { describe, runExec, type ExecLog, type ExecSpec } from "./exec.ts";
 import { Sandboxes } from "./sandboxes.ts";
+import { syncIn, syncOut, type SyncContext } from "./sync.ts";
 
 export const WORKSPACE_DIR = "/workspace/paperclip";
 
@@ -60,6 +64,14 @@ function pickTimeout(cfg: WsmConfig, params: { timeoutMs?: number; commandTimeou
   if (typeof params.timeoutMs === "number" && params.timeoutMs > 0) return params.timeoutMs;
   if (typeof params.commandTimeoutMs === "number" && params.commandTimeoutMs > 0) return params.commandTimeoutMs;
   return cfg.timeoutMs;
+}
+
+async function syncContext(params: PluginEnvironmentSyncInParams | PluginEnvironmentSyncOutParams, hook: string): Promise<SyncContext> {
+  const cfg = parseConfig(params.config);
+  const lease = await sandboxes.resolve(params.lease.providerLeaseId, cfg.project);
+  const minimum = typeof params.minimumTimeoutMs === "number" && params.minimumTimeoutMs > 0 ? params.minimumTimeoutMs : 0;
+  log.info(`s05 ${hook} sandbox=${lease.sandbox} operations=${params.operations.length}`);
+  return { target: lease.target, timeoutMs: Math.max(cfg.timeoutMs, minimum), log };
 }
 
 async function release(params: PluginEnvironmentReleaseLeaseParams, hook: string): Promise<PluginEnvironmentTerminationReceipt | void> {
@@ -162,6 +174,18 @@ const plugin = definePlugin({
       stderr: r.stderr.toString("utf8"),
       metadata: { durationMs: r.durationMs },
     };
+  },
+
+  // Native sync: tar over exec, with every outbound archive member checked by
+  // the strict reader in tar.ts before anything lands on the host.
+  async onEnvironmentSyncIn(params: PluginEnvironmentSyncInParams): Promise<PluginEnvironmentSyncResult> {
+    const ctx = await syncContext(params, "sync-in");
+    return { operations: await syncIn(ctx, params.operations) };
+  },
+
+  async onEnvironmentSyncOut(params: PluginEnvironmentSyncOutParams): Promise<PluginEnvironmentSyncResult> {
+    const ctx = await syncContext(params, "sync-out");
+    return { operations: await syncOut(ctx, params.operations) };
   },
 });
 
