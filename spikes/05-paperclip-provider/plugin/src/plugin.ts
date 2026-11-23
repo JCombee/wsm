@@ -20,7 +20,7 @@ import type {
   PluginEnvironmentValidationResult,
 } from "@paperclipai/plugin-sdk";
 import { AdminClient } from "./admin.ts";
-import { parseConfig, type WsmConfig } from "./config.ts";
+import { parseConfig as parseStrict, type WsmConfig } from "./config.ts";
 import { describe, runExec, type ExecLog, type ExecSpec } from "./exec.ts";
 import { Sandboxes } from "./sandboxes.ts";
 
@@ -38,6 +38,19 @@ const log: ExecLog = {
 };
 
 const sandboxes = new Sandboxes(new AdminClient(), log);
+const seenExtraKeys = new Set<string>();
+
+/** parseConfig parses the host-built config of a lease or exec hook. */
+function parseConfig(raw: unknown): WsmConfig {
+  const extraKeys: string[] = [];
+  const cfg = parseStrict(raw, { strict: false, extraKeys });
+  const fresh = extraKeys.filter((k) => !seenExtraKeys.has(k));
+  if (fresh.length > 0) {
+    for (const k of fresh) seenExtraKeys.add(k);
+    log.info(`s05 config: ignoring host-added keys [${fresh.sort().join(",")}]`);
+  }
+  return cfg;
+}
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -68,7 +81,7 @@ const plugin = definePlugin({
 
   async onEnvironmentValidateConfig(params: PluginEnvironmentValidateConfigParams): Promise<PluginEnvironmentValidationResult> {
     try {
-      const cfg = parseConfig(params.config);
+      const cfg = parseStrict(params.config);
       return { ok: true, normalizedConfig: { project: cfg.project, timeoutMs: cfg.timeoutMs } };
     } catch (e) {
       return { ok: false, errors: [errorText(e)] };

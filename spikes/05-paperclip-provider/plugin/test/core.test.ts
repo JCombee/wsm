@@ -35,6 +35,15 @@ test("S05 config rejects bad slugs and unknown keys", () => {
     { project: "s05", timeoutMs: 1e12 },
   ];
   for (const raw of bad) assert.throws(() => parseConfig(raw), ConfigError, JSON.stringify(raw));
+  // The lenient mode for host-built hook configs ignores extra keys but still
+  // checks the known ones.
+  const extraKeys: string[] = [];
+  assert.deepEqual(parseConfig({ project: "s05", agentId: "a", reuseLease: false }, { strict: false, extraKeys }),
+    { project: "s05", timeoutMs: DEFAULT_TIMEOUT_MS });
+  assert.deepEqual(extraKeys, ["agentId"]);
+  for (const raw of [{ project: "S05", agentId: "a" }, { project: "s05", reuseLease: true }, { project: "s05", timeoutMs: 5 }]) {
+    assert.throws(() => parseConfig(raw, { strict: false }), ConfigError, JSON.stringify(raw));
+  }
 });
 
 test("S05 lease id round trip", () => {

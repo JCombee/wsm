@@ -26,8 +26,20 @@ function describeKey(key: string): string {
   return JSON.stringify(key.length > 64 ? `${key.slice(0, 64)}…` : key);
 }
 
-/** parseConfig validates a raw driver config strictly. */
-export function parseConfig(raw: unknown): WsmConfig {
+export interface ParseOptions {
+  /**
+   * strict refuses unknown keys. It holds for the operator's saved config
+   * (onEnvironmentValidateConfig). The config Paperclip hands to the lease and
+   * exec hooks is built by the host and carries extra context keys (agentId,
+   * for one), so those hooks parse leniently: the known keys are still
+   * checked, other keys are ignored and reported in extraKeys.
+   */
+  strict?: boolean;
+  extraKeys?: string[];
+}
+
+/** parseConfig validates a raw driver config. */
+export function parseConfig(raw: unknown, opts: ParseOptions = { strict: true }): WsmConfig {
   if (raw === null || typeof raw !== "object" || Array.isArray(raw)) {
     throw new ConfigError("wsm config must be an object");
   }
@@ -41,7 +53,10 @@ export function parseConfig(raw: unknown): WsmConfig {
       if (typeof obj[key] !== "boolean") throw new ConfigError("wsm config.archiveOnRelease must be a boolean");
       continue;
     }
-    if (!KNOWN_KEYS.has(key)) throw new ConfigError(`wsm config has unknown key ${describeKey(key)}`);
+    if (!KNOWN_KEYS.has(key)) {
+      if (opts.strict !== false) throw new ConfigError(`wsm config has unknown key ${describeKey(key)}`);
+      opts.extraKeys?.push(key.slice(0, 64));
+    }
   }
   const project = obj.project;
   if (typeof project !== "string" || !SLUG_RE.test(project)) {
