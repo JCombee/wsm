@@ -53,17 +53,20 @@ runs_json() {
 		jq -c '(if type=="array" then . else (.items // .runs // .data // []) end)'
 }
 
-# res_sticky <ID> PASS|FAIL <detail>: a FAIL from an earlier scenario stays.
+# res_sticky <ID> PASS|FAIL <detail> records a criterion that several
+# scenarios check: it is PASS only while every scenario's last result is PASS.
+# A re-run of a scenario replaces that scenario's own earlier result.
 res_sticky() {
-	local id=$1 status=$2 detail=$3 prev
-	prev=$(grep -P "^${id}\t" "$RESULTS/summary.txt" | head -1)
-	if [[ $prev == *$'\tFAIL\t'* && $status == PASS ]]; then
-		res "$id" FAIL "${prev#*$'\tFAIL\t'}; $sc: $detail"
-	elif [[ $prev == *$'\tPASS\t'* && $status == PASS ]]; then
-		res "$id" PASS "${prev#*$'\tPASS\t'}; $sc: $detail"
-	else
-		res "$id" "$status" "$sc: $detail"
-	fi
+	local id=$1 status=$2 detail=$3 f=$STATE/sticky-$1 agg=PASS all
+	touch "$f"
+	{
+		grep -vP "^\Q$sc\E\t" "$f"
+		printf '%s\t%s\t%s\n' "$sc" "$status" "$detail"
+	} >"$f.tmp"
+	mv "$f.tmp" "$f"
+	grep -qP '\tFAIL\t' "$f" && agg=FAIL
+	all=$(awk -F'\t' '{printf "%s%s: %s %s", (NR>1 ? "; " : ""), $1, $2, $3}' "$f")
+	res "$id" "$agg" "$all"
 }
 
 ensure_agent() {
