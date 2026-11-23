@@ -1,0 +1,1166 @@
+<!doctype html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Paperclip in wsm</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="color-scheme" content="light dark">
+<meta name="description" content="Onderzoek: hoe Paperclip volledig in de geïsoleerde rootless Podman-sandboxes van wsm draait, en wat daarbij niet kan.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: een technisch dossier. Eén leeskolom van ~70 tekens; schema's en tabellen
+   krijgen de volle breedte (max. 1120px). Groen = wsm en zijn grens, oranje = Paperclip,
+   rood = dicht. */
+:root {
+  --bg: #f2f5f4;
+  --surface: #ffffff;
+  --ink: #14201c;
+  --muted: #55645e;
+  --line: #d4ddd9;
+  --line-strong: #9db0a9;
+  --wsm: #23735b;
+  --wsm-soft: #dcefe7;
+  --clip: #b35a0f;
+  --clip-soft: #fbecdb;
+  --deny: #b3261e;
+  --deny-soft: #fbe4e1;
+  --warn: #8a6200;
+  --warn-soft: #f5ecd0;
+  --code-bg: #e8efec;
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1311;
+    --surface: #141c19;
+    --ink: #e2eae6;
+    --muted: #98a9a2;
+    --line: #27322e;
+    --line-strong: #4b5c56;
+    --wsm: #5fc29f;
+    --wsm-soft: #132b23;
+    --clip: #f2a15a;
+    --clip-soft: #342211;
+    --deny: #ff8273;
+    --deny-soft: #3a1714;
+    --warn: #e6bd55;
+    --warn-soft: #2f270f;
+    --code-bg: #1b2521;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1311;
+  --surface: #141c19;
+  --ink: #e2eae6;
+  --muted: #98a9a2;
+  --line: #27322e;
+  --line-strong: #4b5c56;
+  --wsm: #5fc29f;
+  --wsm-soft: #132b23;
+  --clip: #f2a15a;
+  --clip-soft: #342211;
+  --deny: #ff8273;
+  --deny-soft: #3a1714;
+  --warn: #e6bd55;
+  --warn-soft: #2f270f;
+  --code-bg: #1b2521;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 400 16px/1.6 var(--font-body);
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.wrap {
+  max-width: 1120px;
+  margin: 0 auto;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+a { color: var(--wsm); text-underline-offset: 2px; }
+a:focus-visible { outline: 2px solid var(--wsm); outline-offset: 2px; border-radius: 2px; }
+code, kbd { font-family: var(--font-mono); font-size: .86em; background: var(--code-bg); padding: .08em .35em; border-radius: 4px; }
+pre { margin: 0; }
+pre code { display: block; background: none; padding: 0; font-size: .82rem; line-height: 1.55; }
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; line-height: 1.15; margin: 0; }
+p { margin: 0; }
+.prose { max-width: 70ch; display: grid; gap: .9rem; }
+.prose ul, .prose ol { margin: 0; padding-left: 1.2rem; display: grid; gap: .35rem; }
+
+/* Hero */
+.hero { padding-block: 3.2rem 2.4rem; border-bottom: 1px solid var(--line); }
+.hero-inner { display: grid; gap: 1.4rem; }
+.eyebrow { font: 500 .78rem/1.3 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.hero h1 { font-size: clamp(2.6rem, 6vw, 4.2rem); font-weight: 700; letter-spacing: -.015em; }
+.hero h1 .x { color: var(--clip); }
+.hero h1 .w { color: var(--wsm); }
+.lead { font-size: clamp(1.06rem, 1.6vw, 1.2rem); max-width: 62ch; }
+.verdict { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; max-width: 900px; }
+.verdict > div { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; display: grid; gap: 4px; min-width: 0; }
+.verdict dt { font: 500 .72rem/1.2 var(--font-mono); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.verdict dd { margin: 0; font: 600 1.25rem/1.25 var(--font-display); }
+.verdict dd small { display: block; font: 400 .86rem/1.45 var(--font-body); color: var(--muted); margin-top: 2px; }
+.verdict .ok dd { color: var(--wsm); }
+.keypoint { max-width: 70ch; border-left: 3px solid var(--wsm); padding: .2rem 0 .2rem 1rem; }
+
+/* Inhoud */
+.toc { padding-block: 1.6rem; border-bottom: 1px solid var(--line); }
+.toc ol { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 10px; counter-reset: toc; }
+.toc li { counter-increment: toc; }
+.toc a { display: inline-flex; gap: .45em; align-items: baseline; text-decoration: none; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 999px; padding: .3rem .8rem; font-size: .9rem; }
+.toc a::before { content: counter(toc); font: 500 .75rem var(--font-mono); color: var(--muted); }
+.toc a:hover { border-color: var(--wsm); }
+
+section.block { padding-block: 3rem; border-bottom: 1px solid var(--line); display: grid; gap: 1.4rem; scroll-margin-top: 12px; }
+.sec-label { font: 500 .76rem/1.2 var(--font-mono); letter-spacing: .09em; text-transform: uppercase; color: var(--muted); }
+section.block h2 { font-size: clamp(1.7rem, 3.2vw, 2.25rem); font-weight: 700; }
+section.block h3 { font-size: 1.2rem; font-weight: 600; }
+.head-group { display: grid; gap: .5rem; }
+
+/* Schema's */
+figure { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: grid; gap: 12px; min-width: 0; }
+.fig-scroll { overflow-x: auto; }
+figcaption { color: var(--muted); font-size: .92rem; max-width: 80ch; }
+figcaption b { color: var(--ink); font-weight: 600; }
+svg.dg { display: block; width: 100%; height: auto; min-width: 760px; color: var(--ink); font-family: var(--font-body); }
+.dg text { fill: currentColor; font-size: 12px; }
+.dg .b { font-weight: 600; }
+.dg .sub { fill: var(--muted); font-size: 10.5px; }
+.dg .mono { font-family: var(--font-mono); }
+.dg .head { fill: var(--muted); font-family: var(--font-mono); font-size: 10.5px; font-weight: 600; letter-spacing: .08em; }
+.dg .lbl { font-weight: 600; font-size: 12.5px; }
+.dg .h { font-family: var(--font-display); font-size: 15px; font-weight: 700; }
+.dg .t-wsm { fill: var(--wsm); }
+.dg .t-deny { fill: var(--deny); }
+.dg .t-clip { fill: var(--clip); }
+.dg .halo { paint-order: stroke; stroke: var(--surface); stroke-width: 4px; stroke-linejoin: round; }
+.dg .box { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1.2; }
+.dg .box-clip { fill: var(--clip-soft); stroke: var(--clip); stroke-width: 1.4; }
+.dg .box-wsm { fill: var(--wsm-soft); stroke: var(--wsm); stroke-width: 1.4; }
+.dg .box-inj { fill: var(--clip-soft); stroke: var(--deny); stroke-width: 2; }
+.dg .chip { fill: var(--surface); stroke: var(--clip); stroke-width: 1.2; }
+.dg .grens { fill: none; stroke: var(--wsm); stroke-width: 3; }
+.dg .grens-line { stroke: var(--wsm); stroke-width: 2.5; }
+.dg .frame { fill: none; stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 6 4; }
+.dg .deny-box { fill: var(--deny-soft); stroke: var(--deny); stroke-width: 1.4; stroke-dasharray: 5 4; }
+.dg .gov { fill: none; stroke: var(--muted); stroke-width: 1.3; stroke-dasharray: 3 4; }
+.dg .arrow { fill: none; stroke: var(--ink); stroke-width: 1.4; }
+.dg .arrow-wsm { fill: none; stroke: var(--wsm); stroke-width: 1.8; }
+.dg .arrow-deny { fill: none; stroke: var(--deny); stroke-width: 1.6; stroke-dasharray: 6 4; }
+.dg .ret { stroke-dasharray: 5 4; }
+.dg .life { stroke: var(--line-strong); stroke-width: 1; stroke-dasharray: 3 5; }
+.dg .conn { stroke: var(--clip); stroke-width: 1.4; }
+.dg .mount { stroke: var(--line-strong); stroke-width: 1.2; stroke-dasharray: 3 3; }
+.dg .bar-ink { fill: var(--ink); }
+.dg .bar-wsm { fill: var(--wsm); }
+.dg .band { fill: var(--wsm-soft); }
+.dg .divider { stroke: var(--line); stroke-width: 1; }
+.dg .mk { fill: var(--ink); }
+.dg .mk-wsm { fill: var(--wsm); }
+.dg .mk-deny { fill: var(--deny); }
+.dg .x-bg { fill: var(--surface); stroke: var(--deny); stroke-width: 1.5; }
+.dg .x-line { fill: none; stroke: var(--deny); stroke-width: 2; stroke-linecap: round; }
+.dg .num { fill: var(--deny); font-family: var(--font-mono); font-size: 11px; font-weight: 600; }
+.dg .hatch-line { stroke: var(--muted); stroke-width: 2; opacity: .2; }
+.dg .ok-pill { fill: var(--wsm-soft); stroke: var(--wsm); stroke-width: 1.2; }
+.dg .no-pill { fill: var(--deny-soft); stroke: var(--deny); stroke-width: 1.2; }
+
+/* Tabellen */
+.table-wrap { overflow-x: auto; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; }
+table { border-collapse: collapse; width: 100%; font-size: .92rem; }
+th, td { text-align: left; vertical-align: top; padding: .6rem .8rem; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+th { font: 600 .72rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); background: var(--surface); white-space: nowrap; }
+td.k { white-space: nowrap; }
+td.why { color: var(--muted); min-width: 22ch; }
+.pill { display: inline-flex; align-items: center; gap: .35em; font: 500 .76rem/1 var(--font-mono); padding: .32em .62em; border-radius: 999px; border: 1px solid; white-space: nowrap; }
+.pill.open { color: var(--wsm); background: var(--wsm-soft); border-color: var(--wsm); }
+.pill.dicht { color: var(--deny); background: var(--deny-soft); border-color: var(--deny); border-style: dashed; }
+.pill.cond { color: var(--warn); background: var(--warn-soft); border-color: var(--warn); }
+.pill.muted { color: var(--muted); background: transparent; border-color: var(--line-strong); }
+
+/* Kaarten */
+.two { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.card { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: grid; gap: .6rem; align-content: start; min-width: 0; }
+.card.advies { border-color: var(--wsm); }
+.card h3 { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
+.card dl { margin: 0; display: grid; gap: .5rem; }
+.card dt { font: 600 .72rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.card dd { margin: 0; }
+.code-card { background: var(--code-bg); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; overflow-x: auto; min-width: 0; }
+.code-title { font: 500 .76rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); margin-bottom: .6rem; }
+
+.exc-legend { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; font-size: .9rem; color: var(--muted); }
+.exc-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+.exc { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 18px; display: grid; gap: .7rem; align-content: start; min-width: 0; }
+.exc header { display: grid; grid-template-columns: auto 1fr; gap: .2rem .75rem; align-items: baseline; }
+.exc .id { font: 600 1.05rem/1 var(--font-mono); color: var(--muted); }
+.exc h3 { font-size: 1.08rem; font-weight: 600; }
+.exc .tagrow { grid-column: 2; }
+.exc dl { margin: 0; display: grid; gap: .45rem; font-size: .93rem; }
+.exc dt { font: 600 .7rem/1.3 var(--font-mono); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.exc dd { margin: 0; }
+.refs { font: 400 .78rem/1.5 var(--font-mono); color: var(--muted); border-top: 1px solid var(--line); padding-top: .6rem; }
+
+.steps { list-style: none; margin: 0; padding: 0; display: grid; gap: 14px; counter-reset: step; max-width: 900px; }
+.steps > li { counter-increment: step; display: grid; grid-template-columns: 2.4rem 1fr; gap: 12px; background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; }
+.steps > li::before { content: counter(step); font: 600 1.4rem/1 var(--font-display); color: var(--wsm); }
+.steps > li > div { display: grid; gap: .5rem; min-width: 0; }
+.check { list-style: none; margin: 0; padding: 0; display: grid; gap: .35rem; }
+.check li { position: relative; padding-left: 1.6rem; }
+.check li::before { content: ""; position: absolute; left: 0; top: .42rem; width: .8rem; height: .8rem; border: 1.5px solid var(--wsm); border-radius: 3px; }
+
+.questions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 28px; margin: 0; padding: 0; list-style: none; }
+.questions li { border-top: 1px solid var(--line); padding-top: .6rem; min-width: 0; }
+.questions b { display: block; font-weight: 600; }
+
+footer { padding-block: 2.4rem 3rem; color: var(--muted); font-size: .9rem; display: grid; gap: 1rem; }
+footer ul { margin: 0; padding-left: 1.1rem; display: grid; gap: .25rem; }
+footer code { font-size: .8rem; }
+
+@media (max-width: 900px) {
+  .exc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 680px) {
+  .verdict, .two, .exc-grid, .questions { grid-template-columns: minmax(0, 1fr); }
+  section.block { padding-block: 2.2rem; }
+  figure { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { scroll-behavior: auto !important; }
+}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap hero-inner">
+    <p class="eyebrow">Onderzoek · 22 november 2026 · Paperclip-commit 7671e0c · wsm brief/v1</p>
+    <h1><span class="x">Paperclip</span> in <span class="w">wsm</span></h1>
+    <p class="lead">Kan Paperclip volledig in de geïsoleerde rootless Podman-sandboxes van wsm draaien, en daar ook zijn werk doen? Ja, als één sandbox per Paperclip-instantie. De server, de database, de plugins en alle agents draaien samen in één werkcontainer. Het board van Paperclip is de preview van die sandbox.</p>
+    <dl class="verdict">
+      <div class="ok"><dt>Vorm</dt><dd>Eén sandbox per instantie<small>We noemen die de hoofdkantoor-sandbox.</small></dd></div>
+      <div class="ok"><dt>Wijzigingen aan wsm</dt><dd>Geen nodig<small>Alles past in fase 1, en geen invariant wordt gebroken.</small></dd></div>
+      <div><dt>Uitzonderingen</dt><dd>9, met reden<small>Van "Paperclip bestuurt andere sandboxes" tot "bijwerken".</small></dd></div>
+    </dl>
+    <p class="keypoint">Binnen die sandbox is er één vertrouwensdomein. Wat Paperclip daar belooft (rollen, goedkeuringen, budgetten), is geen veiligheidsgrens, want elke agent draait als dezelfde gebruiker als de server. De grens is wsm, en die houdt de schade binnen het project.</p>
+  </div>
+</header>
+
+<nav class="toc" aria-label="Inhoud">
+  <div class="wrap">
+    <ol>
+      <li><a href="#grens">Waar ligt de grens?</a></li>
+      <li><a href="#vormen">Twee vormen</a></li>
+      <li><a href="#ontwerp">De hoofdkantoor-sandbox</a></li>
+      <li><a href="#heartbeat">Een heartbeat</a></li>
+      <li><a href="#opbouw">Image en configuratie</a></li>
+      <li><a href="#netwerk">Netwerk</a></li>
+      <li><a href="#data">Data en levensduur</a></li>
+      <li><a href="#login">Inloggen en origins</a></li>
+      <li><a href="#vertrouwen">Vertrouwen binnen de sandbox</a></li>
+      <li><a href="#uitzonderingen">Wat niet kan</a></li>
+      <li><a href="#stappen">Zo pakken we het op</a></li>
+      <li><a href="#vragen">Open vragen</a></li>
+    </ol>
+  </div>
+</nav>
+
+<main>
+
+<!-- 1. De grens -->
+<section class="block wrap" id="grens">
+  <div class="head-group">
+    <p class="sec-label">1 · De kernvraag</p>
+    <h2>Waar ligt de grens?</h2>
+  </div>
+  <div class="prose">
+    <p>Paperclip en wsm trekken de grens op een andere plek. Paperclip draait agents normaal zonder sandbox, op de machine van de server. Met een sandbox-provider is de server de vertrouwde kant en de sandbox de onbetrouwbare. wsm gaat ervan uit dat alles in een sandbox vijandig is, en dat alleen de manager, de helper en de host te vertrouwen zijn.</p>
+    <p>"Paperclip volledig in wsm" zet dus ook de Paperclip-server aan de onbetrouwbare kant.</p>
+  </div>
+  <figure>
+    <div class="fig-scroll">
+      <svg class="dg" viewBox="0 0 980 372" role="img" aria-label="Vier rijen die tonen waar de grens ligt: bij Paperclip met een sandbox-provider tussen server en agent-sandbox, bij Paperclip lokaal nergens, bij wsm tussen host en sandbox, en in dit ontwerp tussen de wsm-host en een sandbox waarin de Paperclip-server en de agents samen staan.">
+        <defs>
+          <pattern id="f1-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line class="hatch-line" x1="0" y1="0" x2="0" y2="8"/>
+          </pattern>
+        </defs>
+        <text class="head" x="370" y="22" text-anchor="middle">VERTROUWD</text>
+        <text class="head" x="534" y="22" text-anchor="middle">GRENS</text>
+        <text class="head" x="749" y="22" text-anchor="middle">ONBETROUWBAAR</text>
+
+        <text class="lbl" x="12" y="64">Paperclip met</text>
+        <text class="lbl" x="12" y="82">sandbox-provider</text>
+        <rect class="box" x="220" y="40" width="300" height="56" rx="8"/>
+        <text class="b" x="370" y="64" text-anchor="middle">Paperclip-server</text>
+        <text class="sub" x="370" y="82" text-anchor="middle">vertrouwde host</text>
+        <rect class="bar-ink" x="526" y="36" width="16" height="64" rx="3"/>
+        <rect class="box" x="548" y="40" width="402" height="56" rx="8"/>
+        <rect x="548" y="40" width="402" height="56" rx="8" fill="url(#f1-hatch)"/>
+        <text class="b halo" x="749" y="64" text-anchor="middle">agent-sandbox (Daytona, E2B, Kubernetes …)</text>
+        <text class="sub halo" x="749" y="82" text-anchor="middle">Paperclip bewaakt alleen de API-bridge en de bestandssync</text>
+
+        <text class="lbl" x="12" y="136">Paperclip lokaal</text>
+        <text class="sub" x="12" y="154">de standaard</text>
+        <rect class="box" x="220" y="112" width="730" height="56" rx="8"/>
+        <text class="b" x="585" y="136" text-anchor="middle">Paperclip-server en agents, als dezelfde gebruiker</text>
+        <text class="sub" x="585" y="154" text-anchor="middle">geen grens: "Local CLI adapters run unsandboxed on the host machine"</text>
+
+        <text class="lbl" x="12" y="208">wsm</text>
+        <text class="sub" x="12" y="226">fase 1</text>
+        <rect class="box" x="220" y="184" width="300" height="56" rx="8"/>
+        <text class="b" x="370" y="208" text-anchor="middle">manager · helper · host</text>
+        <text class="sub" x="370" y="226" text-anchor="middle">vertrouwd, buiten bereik van agents</text>
+        <rect class="bar-wsm" x="526" y="180" width="16" height="64" rx="3"/>
+        <rect class="box" x="548" y="184" width="402" height="56" rx="8"/>
+        <rect x="548" y="184" width="402" height="56" rx="8" fill="url(#f1-hatch)"/>
+        <text class="b halo" x="749" y="208" text-anchor="middle">sandbox</text>
+        <text class="sub halo" x="749" y="226" text-anchor="middle">alles hierbinnen geldt als vijandig</text>
+
+        <rect class="band" x="0" y="252" width="966" height="80" rx="10"/>
+        <text class="lbl t-wsm" x="12" y="286">Dit ontwerp</text>
+        <text class="sub" x="12" y="304">hoofdkantoor-sandbox</text>
+        <rect class="box" x="220" y="264" width="300" height="56" rx="8"/>
+        <text class="b" x="370" y="288" text-anchor="middle">manager · helper · host</text>
+        <text class="sub" x="370" y="306" text-anchor="middle">ongewijzigd</text>
+        <rect class="bar-wsm" x="526" y="260" width="16" height="64" rx="3"/>
+        <rect class="box" x="548" y="264" width="402" height="56" rx="8"/>
+        <rect x="548" y="264" width="402" height="56" rx="8" fill="url(#f1-hatch)"/>
+        <rect class="box-clip" x="562" y="276" width="160" height="32" rx="6"/>
+        <text class="b" x="642" y="297" text-anchor="middle">Paperclip-server</text>
+        <rect class="box-clip" x="732" y="276" width="96" height="32" rx="6"/>
+        <text class="b" x="780" y="297" text-anchor="middle">agents</text>
+        <text class="sub halo" x="842" y="290">één domein,</text>
+        <text class="sub halo" x="842" y="304">zelfde UID</text>
+
+        <rect class="bar-wsm" x="220" y="344" width="16" height="14" rx="2"/>
+        <text class="sub" x="244" y="355">wsm-grens: rootless Podman per project, hardening, nftables</text>
+        <rect class="bar-ink" x="620" y="344" width="16" height="14" rx="2"/>
+        <text class="sub" x="644" y="355">Paperclips eigen grens</text>
+      </svg>
+    </div>
+    <figcaption><b>Figuur 1.</b> In dit ontwerp staat de Paperclip-server aan de onbetrouwbare kant van de wsm-grens, naast zijn agents. Paperclips eigen grens tussen server en agent-sandbox valt weg, en de wsm-grens blijft staan.</figcaption>
+  </figure>
+</section>
+
+<!-- 2. Twee vormen -->
+<section class="block wrap" id="vormen">
+  <div class="head-group">
+    <p class="sec-label">2 · De keuze</p>
+    <h2>Twee vormen, en maar één kan</h2>
+  </div>
+  <div class="prose">
+    <p><b>Vorm A</b> zet alles in één sandbox. Dat is Paperclips lokale model, in een afgesloten doos.</p>
+    <p><b>Vorm B</b> zet de server in sandbox P en elke agent in een eigen sandbox. Dan moet P andere sandboxes kunnen aanmaken, er commando's in draaien en er bestanden uit halen. Dat zijn precies de beheerbevoegdheden die wsm alleen aan de eigenaar geeft.</p>
+  </div>
+  <figure>
+    <div class="fig-scroll">
+      <svg class="dg" viewBox="0 0 1000 420" role="img" aria-label="Links vorm A: één sandbox met de Paperclip-server en drie agents, aangemaakt door de eigenaar. Rechts vorm B: sandbox P wil sandbox S1 besturen en een sandbox laten aanmaken; alle drie de paden zijn dicht.">
+        <defs>
+          <marker id="f2-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 0 L10 5 L0 10 z"/></marker>
+          <marker id="f2-ahw" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-wsm" d="M0 0 L10 5 L0 10 z"/></marker>
+          <marker id="f2-ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-deny" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+
+        <text class="h" x="0" y="22">A · Alles in één sandbox</text>
+        <rect class="ok-pill" x="396" y="8" width="44" height="20" rx="10"/>
+        <text class="b t-wsm" x="418" y="22" text-anchor="middle">kan</text>
+
+        <rect class="grens" x="30" y="44" width="410" height="270" rx="14"/>
+        <text class="b t-wsm" x="46" y="66">sandbox acme/hq</text>
+        <rect class="box-clip" x="110" y="82" width="250" height="52" rx="8"/>
+        <text class="b" x="235" y="104" text-anchor="middle">Paperclip-server</text>
+        <text class="sub" x="235" y="122" text-anchor="middle">PostgreSQL · plugins · API op 127.0.0.1</text>
+        <line class="conn" x1="235" y1="134" x2="235" y2="166"/>
+        <line class="conn" x1="106" y1="166" x2="364" y2="166"/>
+        <line class="arrow" x1="106" y1="166" x2="106" y2="204" marker-end="url(#f2-ah)"/>
+        <line class="arrow" x1="235" y1="166" x2="235" y2="204" marker-end="url(#f2-ah)"/>
+        <line class="arrow" x1="364" y1="166" x2="364" y2="204" marker-end="url(#f2-ah)"/>
+        <text class="sub" x="46" y="160">start per heartbeat</text>
+        <rect class="box-clip" x="48" y="206" width="116" height="50" rx="8"/>
+        <text class="b" x="106" y="227" text-anchor="middle">agent 1</text>
+        <text class="sub" x="106" y="244" text-anchor="middle">claude</text>
+        <rect class="box-clip" x="177" y="206" width="116" height="50" rx="8"/>
+        <text class="b" x="235" y="227" text-anchor="middle">agent 2</text>
+        <text class="sub" x="235" y="244" text-anchor="middle">codex</text>
+        <rect class="box-clip" x="306" y="206" width="116" height="50" rx="8"/>
+        <text class="b" x="364" y="227" text-anchor="middle">agent 3</text>
+        <text class="sub" x="364" y="244" text-anchor="middle">claude</text>
+        <text class="sub" x="235" y="292" text-anchor="middle">zelfde UID, zelfde bestanden, één MCP-token</text>
+        <line class="arrow-wsm" x1="235" y1="350" x2="235" y2="318" marker-end="url(#f2-ahw)"/>
+        <text class="sub" x="245" y="338">maakt aan en start</text>
+        <rect class="box" x="0" y="350" width="470" height="56" rx="8"/>
+        <text class="b" x="235" y="372" text-anchor="middle">wsm-manager (host)</text>
+        <text class="sub" x="235" y="390" text-anchor="middle">de eigenaar maakt de sandbox aan, met de CLI of het dashboard</text>
+
+        <line class="divider" x1="500" y1="0" x2="500" y2="410"/>
+
+        <text class="h" x="520" y="22">B · Server en agents in aparte sandboxes</text>
+        <rect class="no-pill" x="914" y="8" width="66" height="20" rx="10"/>
+        <text class="b t-deny" x="947" y="22" text-anchor="middle">kan niet</text>
+
+        <rect class="grens" x="540" y="56" width="200" height="110" rx="12"/>
+        <text class="b t-wsm" x="556" y="76">sandbox P</text>
+        <rect class="box-clip" x="556" y="88" width="168" height="62" rx="8"/>
+        <text class="b" x="640" y="114" text-anchor="middle">Paperclip-server</text>
+        <text class="sub" x="640" y="132" text-anchor="middle">wil agents elders starten</text>
+
+        <rect class="grens" x="800" y="56" width="180" height="110" rx="12"/>
+        <text class="b t-wsm" x="816" y="76">sandbox S1</text>
+        <rect class="box-clip" x="816" y="88" width="148" height="62" rx="8"/>
+        <text class="b" x="890" y="114" text-anchor="middle">agent</text>
+        <text class="sub" x="890" y="132" text-anchor="middle">claude of codex</text>
+
+        <line class="arrow-deny" x1="740" y1="100" x2="798" y2="100" marker-end="url(#f2-ahd)"/>
+        <text class="sub t-deny" x="770" y="46" text-anchor="middle">exec + bestanden</text>
+        <g transform="translate(769 100)"><circle class="x-bg" r="9"/><text class="num" y="4" text-anchor="middle">1</text></g>
+        <line class="arrow-deny" x1="800" y1="136" x2="742" y2="136" marker-end="url(#f2-ahd)"/>
+        <text class="sub t-deny" x="770" y="186" text-anchor="middle">runner peilt de API</text>
+        <g transform="translate(771 136)"><circle class="x-bg" r="9"/><text class="num" y="4" text-anchor="middle">2</text></g>
+        <line class="arrow-deny" x1="600" y1="166" x2="600" y2="348" marker-end="url(#f2-ahd)"/>
+        <text class="sub t-deny" x="612" y="226">sandbox aanmaken</text>
+        <g transform="translate(600 262)"><circle class="x-bg" r="9"/><text class="num" y="4" text-anchor="middle">3</text></g>
+
+        <g transform="translate(668 248)"><circle class="x-bg" r="8"/><text class="num" y="4" text-anchor="middle">1</text></g>
+        <text x="684" y="252">geen Podman-socket in een sandbox (invariant 1)</text>
+        <g transform="translate(668 272)"><circle class="x-bg" r="8"/><text class="num" y="4" text-anchor="middle">2</text></g>
+        <text x="684" y="276">sandbox → sandbox is dicht (ADR 0001)</text>
+        <g transform="translate(668 296)"><circle class="x-bg" r="8"/><text class="num" y="4" text-anchor="middle">3</text></g>
+        <text x="684" y="300">alleen de eigenaar maakt sandboxes (aanname 4),</text>
+        <text x="684" y="318">en de MCP heeft geen beheertools (invariant 2)</text>
+
+        <rect class="box" x="520" y="350" width="480" height="56" rx="8"/>
+        <text class="b" x="760" y="372" text-anchor="middle">wsm-manager (host)</text>
+        <text class="sub" x="760" y="390" text-anchor="middle">Podman-sockets en beheer-API alleen voor de manager en de eigenaar</text>
+      </svg>
+    </div>
+    <figcaption><b>Figuur 2.</b> Vorm A gebruikt alleen wat wsm al heeft. Vorm B vraagt dat sandbox P andere sandboxes aanmaakt en bestuurt, en alle drie de paden die daarvoor nodig zijn, sluit wsm bewust af. Paperclip zou het mechanisme wel hebben: het verplaatst code naar runs op afstand al als git bundle, net als wsm. Wat ontbreekt is de bevoegdheid.</figcaption>
+  </figure>
+</section>
+
+<!-- 3. Ontwerp -->
+<section class="block wrap" id="ontwerp">
+  <div class="head-group">
+    <p class="sec-label">3 · Het ontwerp</p>
+    <h2>De hoofdkantoor-sandbox</h2>
+  </div>
+  <div class="prose">
+    <p>Eén wsm-project per Paperclip-company, met één sandbox die Paperclip draait, bijvoorbeeld <code>acme/hq</code>. De werkcontainer start met het image van Paperclip als hoofdproces. De agents zijn child processes van de server, in dezelfde container. Het board is de preview op app-poort 3100.</p>
+  </div>
+  <figure>
+    <div class="fig-scroll">
+      <svg class="dg" viewBox="0 0 1050 530" role="img" aria-label="Architectuur: de browser gaat via Caddy en de preview-proxy van wsm naar de Paperclip-server in de pod. In de werkcontainer draaien de Paperclip-server, PostgreSQL, plugin-workers en de agents. Agents praten met de API via loopback, met de wsm-MCP en MariaDB op de host, en met LLM-API's op internet. LAN, metadata, de host en andere sandboxes zijn dicht.">
+        <defs>
+          <marker id="f3-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 0 L10 5 L0 10 z"/></marker>
+          <marker id="f3-ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-deny" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+
+        <text class="head" x="85" y="34" text-anchor="middle">BUITEN</text>
+        <text class="head" x="330" y="34" text-anchor="middle">HOST</text>
+        <text class="head" x="960" y="34" text-anchor="middle">ELDERS</text>
+
+        <rect class="box" x="20" y="60" width="130" height="44" rx="8"/>
+        <text class="b" x="85" y="79" text-anchor="middle">Browser</text>
+        <text class="sub" x="85" y="95" text-anchor="middle">van de eigenaar</text>
+        <line class="arrow" x1="150" y1="82" x2="188" y2="82" marker-end="url(#f3-ah)"/>
+        <text class="sub halo" x="169" y="74" text-anchor="middle">https</text>
+
+        <rect class="box" x="190" y="60" width="280" height="44" rx="8"/>
+        <text class="b" x="330" y="79" text-anchor="middle">Caddy · TLS</text>
+        <text class="sub mono" x="330" y="95" text-anchor="middle">hq--acme.&lt;preview-domein&gt;</text>
+        <line class="arrow" x1="420" y1="104" x2="420" y2="184" marker-end="url(#f3-ah)"/>
+        <text class="sub halo" x="412" y="128" text-anchor="end">127.0.0.1:8081</text>
+
+        <rect class="frame" x="190" y="140" width="280" height="240" rx="10"/>
+        <text class="b" x="204" y="160">wsm serve · gebruiker wsm</text>
+        <rect class="box-wsm" x="206" y="186" width="248" height="50" rx="8"/>
+        <text class="b" x="330" y="206" text-anchor="middle">preview-proxy</text>
+        <text class="sub" x="330" y="223" text-anchor="middle">eerst passkey, dan preview-cookie</text>
+        <rect class="box-wsm" x="206" y="310" width="248" height="50" rx="8"/>
+        <text class="b" x="330" y="330" text-anchor="middle">MCP-server</text>
+        <text class="sub mono" x="330" y="347" text-anchor="middle">10.255.0.1:7443 · audit</text>
+
+        <rect class="box-wsm" x="190" y="430" width="280" height="56" rx="8"/>
+        <text class="b" x="330" y="452" text-anchor="middle">MariaDB · gebruiker wsm-svc</text>
+        <text class="sub" x="330" y="470" text-anchor="middle">10.255.0.1:20xxx · account per sandbox</text>
+
+        <rect class="grens" x="510" y="40" width="340" height="470" rx="14"/>
+        <text class="b" x="526" y="62">pod sbx-&lt;id&gt; · gebruiker wsm-p-&lt;uid&gt;</text>
+        <rect class="frame" x="526" y="76" width="308" height="322" rx="10"/>
+        <text class="sub" x="540" y="96">werkcontainer · 1000:1000 · cap-drop ALL · limieten</text>
+
+        <rect class="box-clip" x="546" y="110" width="128" height="48" rx="8"/>
+        <text class="b" x="610" y="130" text-anchor="middle">PostgreSQL 18</text>
+        <text class="sub" x="610" y="146" text-anchor="middle">embedded · loopback</text>
+        <rect class="box-clip" x="686" y="110" width="128" height="48" rx="8"/>
+        <text class="b" x="750" y="130" text-anchor="middle">plugin-workers</text>
+        <text class="sub" x="750" y="146" text-anchor="middle">child processes</text>
+        <line class="conn" x1="610" y1="158" x2="610" y2="186"/>
+        <line class="conn" x1="750" y1="158" x2="750" y2="186"/>
+
+        <rect class="box-clip" x="546" y="186" width="268" height="50" rx="8"/>
+        <text class="b" x="680" y="206" text-anchor="middle">Paperclip-server · :3100</text>
+        <text class="sub" x="680" y="223" text-anchor="middle">board · REST-API · WebSocket</text>
+
+        <line class="arrow" x1="600" y1="236" x2="600" y2="288" marker-end="url(#f3-ah)"/>
+        <text class="sub" x="608" y="266">start</text>
+        <line class="arrow" x1="790" y1="290" x2="790" y2="238" marker-end="url(#f3-ah)"/>
+        <text class="sub" x="782" y="266" text-anchor="end">API via loopback</text>
+
+        <rect class="box-clip" x="546" y="290" width="268" height="90" rx="8"/>
+        <text class="b" x="560" y="310">agents · één run per heartbeat</text>
+        <rect class="chip" x="560" y="322" width="72" height="26" rx="6"/>
+        <text x="596" y="339" text-anchor="middle">claude</text>
+        <rect class="chip" x="640" y="322" width="72" height="26" rx="6"/>
+        <text x="676" y="339" text-anchor="middle">codex</text>
+        <rect class="chip" x="720" y="322" width="80" height="26" rx="6"/>
+        <text x="760" y="339" text-anchor="middle">opencode</text>
+        <text class="sub" x="560" y="368">cwd: /workspace of een worktree</text>
+
+        <line class="mount" x1="601" y1="398" x2="601" y2="418"/>
+        <line class="mount" x1="759" y1="398" x2="759" y2="418"/>
+        <rect class="box" x="526" y="418" width="150" height="52" rx="8"/>
+        <text class="b mono" x="601" y="439" text-anchor="middle">/workspace</text>
+        <text class="sub" x="601" y="456" text-anchor="middle">per sandbox · repo</text>
+        <rect class="box" x="684" y="418" width="150" height="52" rx="8"/>
+        <text class="b mono" x="759" y="439" text-anchor="middle">/home/agent</text>
+        <text class="sub" x="759" y="456" text-anchor="middle">per project · data</text>
+        <text class="b t-wsm" x="838" y="500" text-anchor="end">wsm-grens</text>
+
+        <line class="arrow" x1="454" y1="211" x2="544" y2="211" marker-end="url(#f3-ah)"/>
+        <text class="sub halo" x="491" y="203" text-anchor="middle">app-poort</text>
+        <line class="arrow" x1="546" y1="335" x2="456" y2="335" marker-end="url(#f3-ah)"/>
+        <text class="sub halo" x="500" y="327" text-anchor="middle">regel 1 · token</text>
+        <path class="arrow" d="M546 365 H490 V458 H472" marker-end="url(#f3-ah)"/>
+        <text class="sub" x="482" y="414" text-anchor="end">regel 2 · na service_enable</text>
+
+        <rect class="box" x="880" y="186" width="150" height="50" rx="8"/>
+        <text class="b" x="955" y="206" text-anchor="middle">npm · GitHub</text>
+        <text class="sub" x="955" y="223" text-anchor="middle">plugins, skills</text>
+        <line class="arrow" x1="814" y1="211" x2="878" y2="211" marker-end="url(#f3-ah)"/>
+        <text class="sub halo" x="862" y="203" text-anchor="middle">regel 4</text>
+
+        <rect class="box" x="880" y="310" width="150" height="50" rx="8"/>
+        <text class="b" x="955" y="330" text-anchor="middle">LLM-API's</text>
+        <text class="sub" x="955" y="347" text-anchor="middle">Anthropic, OpenAI …</text>
+        <line class="arrow" x1="814" y1="335" x2="878" y2="335" marker-end="url(#f3-ah)"/>
+        <text class="sub halo" x="862" y="327" text-anchor="middle">regel 4</text>
+
+        <rect class="deny-box" x="880" y="418" width="150" height="52" rx="8"/>
+        <text class="b t-deny" x="955" y="439" text-anchor="middle">LAN · metadata</text>
+        <text class="sub t-deny" x="955" y="456" text-anchor="middle">host · andere sandboxes</text>
+        <line class="arrow-deny" x1="850" y1="444" x2="878" y2="444" marker-end="url(#f3-ahd)"/>
+        <g transform="translate(864 444)"><circle class="x-bg" r="8"/><path class="x-line" d="M-3.5 -3.5 L3.5 3.5 M-3.5 3.5 L3.5 -3.5"/></g>
+        <text class="sub t-deny halo" x="864" y="490" text-anchor="middle">regel 3</text>
+      </svg>
+    </div>
+    <figcaption><b>Figuur 3.</b> Alles van Paperclip draait in één werkcontainer, als UID 1000. De groene rand is de wsm-grens. Binnenkomen kan alleen via de preview. Uitgaand verkeer volgt de vier regels van ADR 0001: 1 de MCP, 2 een gedeelde dienst na <code>service_enable</code>, 3 dicht, 4 internet open. Verkeer binnen de pod (agent naar API, server naar database) raakt geen wsm-regel.</figcaption>
+  </figure>
+
+  <h3>Paperclip-begrippen in wsm</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Paperclip</th><th>In wsm</th><th>Toelichting</th></tr></thead>
+      <tbody>
+        <tr><td class="k">Instantie (server + database)</td><td>Eén sandbox, bijv. <code>acme/hq</code></td><td class="why">Server, PostgreSQL, workers en agents in één werkcontainer.</td></tr>
+        <tr><td class="k">Company</td><td>Eén wsm-project per company</td><td class="why">De schade van een injectie stopt bij het project, niet bij de company (U3).</td></tr>
+        <tr><td class="k">Board-UI</td><td>Preview van de sandbox</td><td class="why">App-poort 3100.</td></tr>
+        <tr><td class="k">Board-login</td><td>Tweede laag achter de wsm-passkey</td><td class="why">Better Auth, met e-mail en wachtwoord.</td></tr>
+        <tr><td class="k">Agent in het organigram</td><td>Child process, UID 1000</td><td class="why">Geen scheiding op OS-niveau (U3).</td></tr>
+        <tr><td class="k">Projectworkspace</td><td><code>/workspace</code>, als lokaal pad</td><td class="why">Gevuld met de git bundle van wsm, op de branch <code>agent/hq</code>.</td></tr>
+        <tr><td class="k">Execution-workspace</td><td>Git-worktree in de sandbox</td><td class="why">Paperclip draait git zelf, in de sandbox. Invariant 3 gaat over de manager.</td></tr>
+        <tr><td class="k">Omgeving <code>local</code></td><td>De werkcontainer</td><td class="why">De enige bruikbare omgeving.</td></tr>
+        <tr><td class="k">Omgevingen <code>ssh</code>, <code>sandbox</code>, <code>plugin</code></td><td>Niet beschikbaar</td><td class="why">U1.</td></tr>
+        <tr><td class="k">Secrets</td><td>Database + master key op het home-volume</td><td class="why">De secret-store van wsm komt in fase 2, en ook dan zijn de secrets leesbaar in de sandbox.</td></tr>
+        <tr><td class="k">Goedkeuringen, budgetten</td><td>Alleen binnen Paperclip</td><td class="why">Een werkproces, geen grens. De goedkeuringen van wsm zelf zijn fase 2.</td></tr>
+        <tr><td class="k">Activity log</td><td>In de sandbox, agents kunnen erin schrijven</td><td class="why">De wsm-audit staat erbuiten, maar dekt alleen MCP-calls (U4).</td></tr>
+        <tr><td class="k">Runtime services (dev-servers)</td><td>Processen in dezelfde container</td><td class="why">Niet zichtbaar in de browser (U7).</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- 4. Heartbeat -->
+<section class="block wrap" id="heartbeat">
+  <div class="head-group">
+    <p class="sec-label">4 · In beweging</p>
+    <h2>Een heartbeat, stap voor stap</h2>
+  </div>
+  <div class="prose">
+    <p>Een agent werkt in korte runs. Hieronder één run waarin een agent een issue oppakt, een database aanvraagt via de MCP van wsm, en zijn werk lokaal commit. Alleen de pijlen over de groene lijn verlaten de sandbox.</p>
+  </div>
+  <figure>
+    <div class="fig-scroll">
+      <svg class="dg" viewBox="0 0 1000 580" role="img" aria-label="Sequentiediagram van één heartbeat: de Paperclip-server maakt een worktree, start de agent-CLI, de agent praat met de LLM-API, met de Paperclip-API op 127.0.0.1, vraagt via de wsm-MCP een MariaDB-account aan, draait queries, commit lokaal en meldt zich klaar.">
+        <defs>
+          <marker id="f4-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+        <line class="grens-line" x1="490" y1="6" x2="490" y2="548"/>
+
+        <rect class="box-clip" x="13" y="12" width="144" height="44" rx="8"/>
+        <text class="b" x="85" y="31" text-anchor="middle">Paperclip-server</text>
+        <text class="sub" x="85" y="47" text-anchor="middle">in de sandbox</text>
+        <rect class="box" x="173" y="12" width="144" height="44" rx="8"/>
+        <text class="b" x="245" y="31" text-anchor="middle">git</text>
+        <text class="sub" x="245" y="47" text-anchor="middle">in de sandbox</text>
+        <rect class="box-clip" x="333" y="12" width="144" height="44" rx="8"/>
+        <text class="b" x="405" y="31" text-anchor="middle">agent-CLI</text>
+        <text class="sub" x="405" y="47" text-anchor="middle">claude, codex …</text>
+        <rect class="box" x="503" y="12" width="144" height="44" rx="8"/>
+        <text class="b" x="575" y="31" text-anchor="middle">LLM-API</text>
+        <text class="sub" x="575" y="47" text-anchor="middle">internet</text>
+        <rect class="box-wsm" x="663" y="12" width="144" height="44" rx="8"/>
+        <text class="b" x="735" y="31" text-anchor="middle">wsm-MCP</text>
+        <text class="sub mono" x="735" y="47" text-anchor="middle">10.255.0.1:7443</text>
+        <rect class="box-wsm" x="823" y="12" width="144" height="44" rx="8"/>
+        <text class="b" x="895" y="31" text-anchor="middle">MariaDB</text>
+        <text class="sub" x="895" y="47" text-anchor="middle">gedeelde instantie</text>
+
+        <line class="life" x1="85" y1="56" x2="85" y2="540"/>
+        <line class="life" x1="245" y1="56" x2="245" y2="540"/>
+        <line class="life" x1="405" y1="56" x2="405" y2="540"/>
+        <line class="life" x1="575" y1="56" x2="575" y2="540"/>
+        <line class="life" x1="735" y1="56" x2="735" y2="540"/>
+        <line class="life" x1="895" y1="56" x2="895" y2="540"/>
+
+        <rect class="box-clip" x="16" y="72" width="138" height="40" rx="6"/>
+        <text class="b" x="85" y="89" text-anchor="middle">wekker</text>
+        <text class="sub" x="85" y="104" text-anchor="middle">timer of toewijzing</text>
+
+        <line class="arrow" x1="85" y1="142" x2="243" y2="142" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="165" y="134" text-anchor="middle">worktree voor het issue</text>
+        <line class="arrow" x1="85" y1="184" x2="403" y2="184" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="245" y="176" text-anchor="middle">start de CLI: cwd, env, run-sleutel</text>
+        <line class="arrow" x1="405" y1="226" x2="573" y2="226" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="490" y="218" text-anchor="middle">prompt + context</text>
+        <line class="arrow ret" x1="575" y1="258" x2="407" y2="258" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="490" y="250" text-anchor="middle">tool calls</text>
+        <line class="arrow" x1="405" y1="300" x2="87" y2="300" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="245" y="292" text-anchor="middle">API op 127.0.0.1:3100: issue, commentaar</text>
+        <line class="arrow" x1="405" y1="342" x2="733" y2="342" marker-end="url(#f4-ah)"/>
+        <text class="halo mono" x="570" y="334" text-anchor="middle">service_enable mariadb</text>
+        <line class="arrow ret" x1="735" y1="374" x2="407" y2="374" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="570" y="366" text-anchor="middle">account, pas na de nftables-regel</text>
+        <text class="sub" x="745" y="360">audit vóór het antwoord</text>
+        <line class="arrow" x1="405" y1="416" x2="893" y2="416" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="650" y="408" text-anchor="middle">migraties en queries</text>
+        <line class="arrow" x1="405" y1="458" x2="247" y2="458" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="325" y="450" text-anchor="middle">commit op de issue-branch</text>
+        <line class="arrow ret" x1="405" y1="500" x2="87" y2="500" marker-end="url(#f4-ah)"/>
+        <text class="halo" x="245" y="492" text-anchor="middle">klaar: log, tokens, kosten</text>
+        <text class="sub halo" x="95" y="530">status gaat live naar het board (WebSocket)</text>
+
+        <text class="sub" x="245" y="570" text-anchor="middle">in de sandbox</text>
+        <text class="b t-wsm" x="490" y="570" text-anchor="middle">wsm-grens</text>
+        <text class="sub" x="735" y="570" text-anchor="middle">buiten de sandbox</text>
+      </svg>
+    </div>
+    <figcaption><b>Figuur 4.</b> De run-sleutel (een JWT, standaard 48 uur geldig) en het API-adres zet Paperclip per run in de omgeving van de CLI. Met <code>PAPERCLIP_API_URL=http://127.0.0.1:3100</code> blijft het API-verkeer in de pod. Zonder die instelling krijgen agents de publieke preview-URL, en die blokkeert wsm. De commit blijft lokaal: code naar buiten is fase 2.</figcaption>
+  </figure>
+</section>
+
+<!-- 5. Opbouw en configuratie -->
+<section class="block wrap" id="opbouw">
+  <div class="head-group">
+    <p class="sec-label">5 · Bouwen</p>
+    <h2>Image en configuratie</h2>
+  </div>
+  <div class="prose">
+    <p>Het projectimage moet aan twee lijsten voldoen. wsm vraagt <code>tmux</code>, <code>git</code>, <code>bash</code>, gebruiker 1000 met home <code>/home/agent</code>, en een hoofdproces dat blijft draaien. Paperclip vraagt <code>node</code> 24.11 of nieuwer, de agent-CLI's op <code>PATH</code>, <code>sh</code>, <code>tar</code> en schrijfbare home-, cache- en tmp-mappen. Het entrypoint van Paperclip werkt al zonder root.</p>
+  </div>
+  <div class="two">
+    <div class="card advies">
+      <h3>Route A: afgeleid van het officiële image <span class="pill open">advies</span></h3>
+      <dl>
+        <dt>Basis</dt><dd><code>ghcr.io/paperclipai/paperclip:sha-&lt;commit&gt;</code>, publiek, amd64 en arm64.</dd>
+        <dt>Voordeel</dt><dd>Het artefact dat Paperclip zelf test. Claude Code, Codex, OpenCode, Gemini CLI en Kimi zitten erin.</dd>
+        <dt>Nadeel</dt><dd>Groot: ongeveer 2,9 GB aan dependencies en een provider-pack van ongeveer 2,5 GB, dat we niet gebruiken.</dd>
+        <dt>Erbij</dt><dd><code>tmux</code>, de home van UID 1000 naar <code>/home/agent</code>, en het startscript.</dd>
+      </dl>
+    </div>
+    <div class="card">
+      <h3>Route B: eigen image met npm <span class="pill muted">te testen</span></h3>
+      <dl>
+        <dt>Basis</dt><dd><code>node:24-trixie-slim</code> plus <code>npm install -g paperclipai@&lt;versie&gt;</code>. Dat pakket bevat de server en <code>embedded-postgres</code>; <code>paperclipai run</code> start alles.</dd>
+        <dt>Voordeel</dt><dd>Kleiner, en je kiest zelf de CLI's.</dd>
+        <dt>Nadeel</dt><dd>Niet de route die Paperclip test. De spike moet uitzoeken of het werkt en welke versie bij welke commit hoort.</dd>
+        <dt>Erbij</dt><dd>Alles.</dd>
+      </dl>
+    </div>
+  </div>
+
+  <h3>Van <code>WSM_*</code> naar Paperclip</h3>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Paperclip-instelling</th><th>Waarde</th><th>Waarom</th></tr></thead>
+      <tbody>
+        <tr><td class="k"><code>HOST</code>, <code>PORT</code></td><td><code>0.0.0.0</code>, <code>3100</code></td><td class="why">De preview komt via pasta binnen, en wsm vraagt dat de app op <code>0.0.0.0</code> luistert. 3100 is <code>--app-port</code>.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_DEPLOYMENT_MODE</code><br><code>PAPERCLIP_DEPLOYMENT_EXPOSURE</code></td><td><code>authenticated</code><br><code>private</code></td><td class="why"><code>local_trusted</code> bindt alleen op loopback en heeft geen login. <code>public</code> is voor een open internetadres. Paperclips eigen Docker- en Quadlet-bestanden gebruiken dezelfde combinatie.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_PUBLIC_URL</code></td><td><code>$WSM_PREVIEW_URL</code> zonder de <code>/</code> aan het eind</td><td class="why">De basis-URL voor de login. De hostnaam komt daarmee vanzelf op de lijst met toegestane hostnamen.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_API_URL</code></td><td><code>http://127.0.0.1:3100</code></td><td class="why">Anders krijgen agents de publieke URL. Die loopt via het publieke adres van de host, en dat blokkeert ADR 0001.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_HOME</code></td><td><code>/home/agent/.paperclip</code></td><td class="why">Op het home-volume, zodat de data het verwijderen van de sandbox overleeft.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_INSTANCE_ID</code></td><td><code>$WSM_SANDBOX</code></td><td class="why">Sandboxes van een project delen <code>/home/agent</code>. Met een eigen ID draaien twee instanties nooit op één datamap. Paperclip gebruikt het ID ook in de cookienamen. Een sandboxnaam van wsm (<code>[a-z0-9-]</code>) is altijd een geldig ID.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_DISABLE_CWD_ENV_FILE</code></td><td><code>true</code></td><td class="why">Anders laadt de server ook een <code>.env</code> uit zijn werkmap, <code>/workspace</code>. Daar schrijven agents, en de app heeft er vaak een eigen <code>.env</code>. Een <code>DATABASE_URL</code> daaruit zou Paperclip naar een andere database sturen.</td></tr>
+        <tr><td class="k"><code>BETTER_AUTH_SECRET</code><br><code>PAPERCLIP_TOOL_ACTION_SIGNING_SECRET</code></td><td>Eén keer willekeurig, in <code>&lt;instance&gt;/.env</code> (0600)</td><td class="why">wsm heeft nog geen secret-store (fase 2). Paperclip leest het <code>.env</code>-bestand naast <code>config.json</code>.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_TELEMETRY_DISABLED</code>, <code>DO_NOT_TRACK</code></td><td><code>1</code></td><td class="why">Telemetrie staat anders aan, naar <code>telemetry.paperclip.ing</code>.</td></tr>
+        <tr><td class="k"><code>PAPERCLIP_AUTH_DISABLE_SIGN_UP</code></td><td><code>true</code>, na de eerste admin</td><td class="why">Via loopback kan ook een agent een account aanmaken.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="code-card">
+    <p class="code-title">Schets van de Containerfile, route A, nog niet getest</p>
+<pre><code>FROM ghcr.io/paperclipai/paperclip:sha-&lt;volledige commit-sha&gt;
+
+USER root
+RUN apt-get update \
+ &amp;&amp; apt-get install -y --no-install-recommends tmux bash \
+ &amp;&amp; rm -rf /var/lib/apt/lists/* \
+ &amp;&amp; usermod --login agent --home /home/agent node \
+ &amp;&amp; groupmod --new-name agent node \
+ &amp;&amp; mkdir -p /home/agent &amp;&amp; chown 1000:1000 /home/agent
+
+# De build-context van wsm bevat alleen de Containerfile (ADR 0008),
+# dus het startscript staat inline.
+RUN cat &gt; /usr/local/bin/wsm-paperclip &lt;&lt;'EOF'
+#!/bin/sh
+set -eu
+: "${WSM_PREVIEW_URL:?het project heeft --app-port 3100 en een preview-domein nodig}"
+export PAPERCLIP_HOME="$HOME/.paperclip"
+export PAPERCLIP_INSTANCE_ID="$WSM_SANDBOX"
+inst="$PAPERCLIP_HOME/instances/$PAPERCLIP_INSTANCE_ID"
+export PAPERCLIP_CONFIG="$inst/config.json"
+export HOST=0.0.0.0 PORT=3100
+export PAPERCLIP_DEPLOYMENT_MODE=authenticated PAPERCLIP_DEPLOYMENT_EXPOSURE=private
+export PAPERCLIP_PUBLIC_URL="${WSM_PREVIEW_URL%/}"
+export PAPERCLIP_API_URL="http://127.0.0.1:3100"
+export PAPERCLIP_TELEMETRY_DISABLED=1 DO_NOT_TRACK=1
+export PAPERCLIP_DISABLE_CWD_ENV_FILE=true
+umask 077
+mkdir -p "$inst"
+if [ ! -f "$inst/.env" ]; then
+  node -e 'const r=()=&gt;require("crypto").randomBytes(32).toString("hex");
+    console.log("BETTER_AUTH_SECRET="+r()+"\nPAPERCLIP_TOOL_ACTION_SIGNING_SECRET="+r())' &gt; "$inst/.env"
+fi
+# Houd de sandbox in leven als Paperclip herstart, en geef een stop door.
+trap 'kill -TERM "$pid" 2&gt;/dev/null; wait "$pid"; exit 0' TERM INT
+while :; do
+  "$@" &amp; pid=$!
+  wait "$pid" || true
+  sleep 5
+done
+EOF
+RUN chmod 0755 /usr/local/bin/wsm-paperclip
+
+USER 1000:1000
+WORKDIR /workspace
+# wsm start de container al met --init, dus tini is hier niet nodig.
+ENTRYPOINT ["/usr/local/bin/wsm-paperclip"]
+CMD ["node", "/app/server/dist-runtime/index.mjs"]</code></pre>
+  </div>
+  <div class="prose">
+    <p><b>Het project aanmaken.</b> Kies de limieten ruim, want ze liggen vast na <code>project create</code>. De standaard (2 CPU's, 2 GiB, 1024 pids) is te krap voor een server, een database en meerdere agents tegelijk.</p>
+  </div>
+  <div class="code-card">
+<pre><code>wsm project create --slug acme \
+  --containerfile examples/paperclip/Containerfile \
+  --repo git@github.com:acme/product.git --branch main \
+  --cpus 4 --memory 8g --pids 4096 --app-port 3100
+wsm project key acme                            # read-only deploy key toevoegen
+wsm project block set acme mariadb --tag 11.8   # optioneel, voor de app van de agents
+wsm sandbox create acme/hq
+wsm sandbox start acme/hq
+wsm shell acme/hq   # eenmalig: paperclipai auth bootstrap-ceo, claude login, codex login</code></pre>
+  </div>
+</section>
+
+<!-- 6. Netwerk -->
+<section class="block wrap" id="netwerk">
+  <div class="head-group">
+    <p class="sec-label">6 · Verkeer</p>
+    <h2>Netwerk</h2>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Van → naar</th><th>Pad</th><th>Regel</th><th>Resultaat</th></tr></thead>
+      <tbody>
+        <tr><td>Browser → board</td><td>Caddy → preview-proxy → <code>127.0.0.1:47xxx</code> → pasta → <code>:3100</code></td><td class="why">Passkey en <code>__Host-wsm_preview</code> (ADR 0016, 0017)</td><td><span class="pill cond">na login</span></td></tr>
+        <tr><td>Agent → Paperclip-API</td><td><code>127.0.0.1:3100</code> in de pod</td><td class="why">Blijft in de network namespace van de pod (ADR 0006)</td><td><span class="pill open">open</span></td></tr>
+        <tr><td>Server → PostgreSQL</td><td>Loopback in de pod, <code>127.0.0.1:54329</code></td><td class="why">Idem</td><td><span class="pill open">open</span></td></tr>
+        <tr><td>Agent → LLM-API's</td><td>Internet</td><td class="why">Regel 4</td><td><span class="pill open">open</span></td></tr>
+        <tr><td>Server → npm, GitHub, templates</td><td>Internet</td><td class="why">Regel 4</td><td><span class="pill open">open</span></td></tr>
+        <tr><td>Server → telemetrie</td><td><code>telemetry.paperclip.ing</code></td><td class="why">Regel 4</td><td><span class="pill cond">uitzetten</span></td></tr>
+        <tr><td>Server → Discord-gateway (chat)</td><td>Internet, een uitgaande WebSocket</td><td class="why">Regel 4</td><td><span class="pill open">open</span></td></tr>
+        <tr><td>Agent → wsm-MCP</td><td><code>10.255.0.1:7443</code></td><td class="why">Regel 1, met bearer-token</td><td><span class="pill open">open</span></td></tr>
+        <tr><td>Agent → MariaDB</td><td><code>10.255.0.1:20000–20999</code></td><td class="why">Regel 2, per project (ADR 0014)</td><td><span class="pill cond">na service_enable</span></td></tr>
+        <tr><td>Sandbox → andere sandbox</td><td>Loopback of publiek adres van de host</td><td class="why">Regel 3 (<code>TestOtherProjectPreviewPort</code>)</td><td><span class="pill dicht">dicht</span></td></tr>
+        <tr><td>Sandbox → LAN, metadata, manager-API, Podman-socket</td><td>—</td><td class="why">Regel 3, invariant 1</td><td><span class="pill dicht">dicht</span></td></tr>
+        <tr><td>Internet → Paperclip, zonder wsm-login</td><td>Preview-proxy</td><td class="why">Redirect of 401 (ADR 0017)</td><td><span class="pill dicht">dicht</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="prose">
+    <p>WebSockets voor de live updates gaan door de preview-proxy. Die geeft <code>Upgrade</code> door, en de listener heeft geen schrijf-timeout. De proxy wacht wel hoogstens 60 s op de eerste respons van de app: een API-call die langer rekent, krijgt een 502. De spike moet bevestigen dat de live updates via de preview werken.</p>
+  </div>
+</section>
+
+<!-- 7. Data -->
+<section class="block wrap" id="data">
+  <div class="head-group">
+    <p class="sec-label">7 · Opslag</p>
+    <h2>Data en levensduur</h2>
+  </div>
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>Data</th><th>Plek</th><th>Stop en start</th><th>Sandbox weg</th><th>Project weg</th></tr></thead>
+      <tbody>
+        <tr><td>Paperclip-database</td><td><code>~/.paperclip/instances/&lt;sandbox&gt;/db</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Bijlagen en back-ups van de database</td><td><code>…/instances/&lt;sandbox&gt;/data/storage</code> en <code>data/backups</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Logs</td><td><code>…/instances/&lt;sandbox&gt;/logs</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Master key en <code>.env</code></td><td><code>…/instances/&lt;sandbox&gt;/secrets/master.key</code> en <code>.env</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Werkmappen van agents zonder project, beheerde checkouts, Codex-homes per agent</td><td><code>…/instances/&lt;sandbox&gt;/workspaces</code>, <code>projects</code> en <code>companies</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Plugins, voor alle instanties van het project samen</td><td><code>~/.paperclip/plugins</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Logins van de agent-CLI's</td><td><code>/home/agent/.claude</code>, <code>.codex</code></td><td><span class="pill open">blijft</span></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Code: repo, commits en worktrees</td><td><code>/workspace</code>, worktrees in <code>/workspace/.paperclip/worktrees</code></td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Schrijflaag van de container</td><td><code>/tmp</code> en dergelijke</td><td><span class="pill open">blijft</span></td><td><span class="pill dicht">weg</span></td><td><span class="pill dicht">weg</span></td></tr>
+        <tr><td>Paperclip zelf</td><td>Het image, alleen-lezen voor UID 1000</td><td colspan="3" class="why">Wisselt alleen met een nieuw image (U9).</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="prose">
+    <ul>
+      <li><b>Nooit twee processen op één datamap.</b> Twee Paperclip-processen op dezelfde datamap betekent corrupte PostgreSQL-data. De eigen <code>PAPERCLIP_INSTANCE_ID</code> per sandbox voorkomt dat.</li>
+      <li><b>De back-ups van Paperclip zijn geen echte back-up.</b> Ze staan op hetzelfde volume. Een echte back-up is een export van het home-volume buiten de sandbox om, en dat is handwerk.</li>
+      <li><b>Dezelfde naam, dezelfde data.</b> Na het verwijderen van <code>acme/hq</code> vindt een nieuwe sandbox met dezelfde naam de Paperclip-data terug, maar niet de code en niet de worktrees.</li>
+      <li><b>Plugins zijn per project.</b> Paperclip installeert ze in <code>~/.paperclip/plugins</code>, niet per instantie. Alle sandboxes van het project delen die map.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 8. Login -->
+<section class="block wrap" id="login">
+  <div class="head-group">
+    <p class="sec-label">8 · Toegang</p>
+    <h2>Inloggen en origins</h2>
+  </div>
+  <div class="prose">
+    <p>Het board staat achter twee lagen: eerst de passkey van wsm, daarna de eigen login van Paperclip. De cookies van wsm en van Paperclip staan elk op hun eigen origin.</p>
+  </div>
+  <figure>
+    <div class="fig-scroll">
+      <svg class="dg" viewBox="0 0 1000 480" role="img" aria-label="Sequentiediagram van de login: de browser gaat zonder cookie naar de preview, wordt via het dashboard en de passkey teruggestuurd met een eenmalig token, krijgt de preview-cookie, en logt daarna in bij Paperclip, dat de preview-cookie nooit ziet.">
+        <defs>
+          <marker id="f5-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+        <line class="grens-line" x1="735" y1="6" x2="735" y2="458"/>
+
+        <rect class="box" x="20" y="12" width="160" height="46" rx="8"/>
+        <text class="b" x="100" y="32" text-anchor="middle">Browser</text>
+        <text class="sub" x="100" y="49" text-anchor="middle">van de eigenaar</text>
+        <rect class="box-wsm" x="260" y="12" width="160" height="46" rx="8"/>
+        <text class="b" x="340" y="32" text-anchor="middle">Dashboard</text>
+        <text class="sub mono" x="340" y="49" text-anchor="middle">dash.&lt;domein&gt;</text>
+        <rect class="box-wsm" x="520" y="12" width="160" height="46" rx="8"/>
+        <text class="b" x="600" y="32" text-anchor="middle">Preview-proxy</text>
+        <text class="sub mono" x="600" y="49" text-anchor="middle">hq--acme.&lt;preview&gt;</text>
+        <rect class="box-clip" x="790" y="12" width="160" height="46" rx="8"/>
+        <text class="b" x="870" y="32" text-anchor="middle">Paperclip</text>
+        <text class="sub" x="870" y="49" text-anchor="middle">in de sandbox</text>
+
+        <line class="life" x1="100" y1="58" x2="100" y2="450"/>
+        <line class="life" x1="340" y1="58" x2="340" y2="450"/>
+        <line class="life" x1="600" y1="58" x2="600" y2="450"/>
+        <line class="life" x1="870" y1="58" x2="870" y2="450"/>
+
+        <line class="arrow" x1="100" y1="96" x2="598" y2="96" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="350" y="88" text-anchor="middle">GET / zonder preview-cookie</text>
+        <line class="arrow ret" x1="600" y1="128" x2="102" y2="128" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="350" y="120" text-anchor="middle">303 naar het dashboard</text>
+        <line class="arrow" x1="100" y1="170" x2="338" y2="170" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="220" y="162" text-anchor="middle">/preview-auth met passkey-sessie</text>
+        <line class="arrow ret" x1="340" y1="202" x2="102" y2="202" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="220" y="194" text-anchor="middle">eenmalig token, 60 s, voor deze host</text>
+        <line class="arrow" x1="100" y1="244" x2="598" y2="244" marker-end="url(#f5-ah)"/>
+        <text class="halo mono" x="350" y="236" text-anchor="middle">/__wsm/auth?token=…</text>
+        <line class="arrow ret" x1="600" y1="276" x2="102" y2="276" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="350" y="268" text-anchor="middle">zet __Host-wsm_preview (12 uur)</text>
+        <line class="arrow" x1="100" y1="318" x2="598" y2="318" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="350" y="310" text-anchor="middle">GET / met cookie</text>
+        <line class="arrow" x1="600" y1="350" x2="868" y2="350" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="735" y="342" text-anchor="middle">zonder __Host-wsm_preview</text>
+        <line class="arrow ret" x1="870" y1="392" x2="102" y2="392" marker-end="url(#f5-ah)"/>
+        <text class="halo" x="485" y="384" text-anchor="middle">login van Paperclip, eigen sessie-cookie</text>
+        <text class="sub halo" x="110" y="430">vanaf nu gaat elk verzoek door beide lagen</text>
+
+        <text class="b t-wsm" x="735" y="474" text-anchor="middle">wsm-grens</text>
+      </svg>
+    </div>
+    <figcaption><b>Figuur 5.</b> De passkey hoort alleen bij de dashboard-host, en de dashboard-cookies hebben het <code>__Host-</code>-prefix. Paperclip ziet de preview-cookie nooit: de proxy haalt die weg, in beide richtingen. Invariant 10 blijft daarmee heel.</figcaption>
+  </figure>
+  <div class="prose">
+    <ul>
+      <li><b>Wie het eerst claimt, wint.</b> Zolang er geen instance-admin is, wint de eerste ingelogde browser die het board claimt. Een agent kan via loopback ook een account aanmaken. Draai daarom direct na de eerste start <code>paperclipai auth bootstrap-ceo</code> in <code>wsm shell</code>, vóórdat er agents draaien, en zet daarna <code>PAPERCLIP_AUTH_DISABLE_SIGN_UP=true</code>.</li>
+      <li><b>Cookie tossing.</b> Een andere preview-app kan een cookie voor het hele preview-domein zetten, en Paperclip ontvangt die (ADR 0017, punt 8). Dat is geaccepteerd zolang er één eigenaar is. Een apart registreerbaar preview-domein blijft het advies.</li>
+      <li><b>Invariant 11 gaat over het wsm-dashboard.</b> Paperclip toont agent-content op zijn eigen preview-origin, met HTML-artefacten in een sandboxed iframe. Dat raakt het dashboard niet.</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 9. Vertrouwen -->
+<section class="block wrap" id="vertrouwen">
+  <div class="head-group">
+    <p class="sec-label">9 · Wat de grens wel en niet doet</p>
+    <h2>Vertrouwen binnen de sandbox</h2>
+  </div>
+  <div class="prose">
+    <p>Paperclip zegt het zelf: binnen een sandbox beschermt het niets, en lokale adapters draaien zonder sandbox. In dit ontwerp betekent dat: wat één agent kan, kunnen alle agents. Ook het startscript of de server zelf vormt geen grens.</p>
+  </div>
+  <figure>
+    <div class="fig-scroll">
+      <svg class="dg" viewBox="0 0 1000 400" role="img" aria-label="Een geïnjecteerde agent in sandbox acme/hq kan de PostgreSQL-data, de master key, het serverproces, de CLI-logins, het MCP-token en de code lezen en wijzigen. De rollen en goedkeuringen van Paperclip houden dat niet tegen. Een andere sandbox en de wsm-host zijn wel onbereikbaar.">
+        <defs>
+          <marker id="f6-ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk" d="M0 0 L10 5 L0 10 z"/></marker>
+          <marker id="f6-ahd" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="mk-deny" d="M0 0 L10 5 L0 10 z"/></marker>
+        </defs>
+        <rect class="frame" x="8" y="8" width="984" height="384" rx="16"/>
+        <text class="b" x="24" y="32">host · vertrouwd</text>
+        <text class="sub" x="24" y="50">wsm-manager · wsm-helper · audit-log · Podman-sockets</text>
+
+        <rect class="grens" x="32" y="66" width="640" height="310" rx="14"/>
+        <text class="b t-wsm" x="48" y="90">sandbox acme/hq · één vertrouwensdomein, alles als UID 1000</text>
+
+        <rect class="box-inj" x="56" y="112" width="190" height="58" rx="8"/>
+        <text class="b" x="151" y="136" text-anchor="middle">agent met injectie</text>
+        <text class="sub" x="151" y="154" text-anchor="middle">bijv. via de tekst van een issue</text>
+        <rect class="box-clip" x="56" y="190" width="190" height="50" rx="8"/>
+        <text class="b" x="151" y="211" text-anchor="middle">andere agents</text>
+        <text class="sub" x="151" y="228" text-anchor="middle">zelfde gebruiker</text>
+        <rect class="gov" x="56" y="262" width="190" height="88" rx="8"/>
+        <text class="b" x="151" y="290" text-anchor="middle">rollen · goedkeuringen</text>
+        <text class="b" x="151" y="306" text-anchor="middle">budgetten</text>
+        <text class="sub" x="151" y="328" text-anchor="middle">werkproces, geen grens</text>
+
+        <text class="sub" x="254" y="104">kan lezen en wijzigen</text>
+        <line class="arrow" x1="246" y1="141" x2="328" y2="124" marker-end="url(#f6-ah)"/>
+        <line class="arrow" x1="246" y1="141" x2="328" y2="164" marker-end="url(#f6-ah)"/>
+        <line class="arrow" x1="246" y1="141" x2="328" y2="204" marker-end="url(#f6-ah)"/>
+        <line class="arrow" x1="246" y1="141" x2="328" y2="244" marker-end="url(#f6-ah)"/>
+        <line class="arrow" x1="246" y1="141" x2="328" y2="284" marker-end="url(#f6-ah)"/>
+        <line class="arrow" x1="246" y1="141" x2="328" y2="324" marker-end="url(#f6-ah)"/>
+        <rect class="box" x="330" y="108" width="320" height="32" rx="6"/>
+        <text x="344" y="129">PostgreSQL-data van Paperclip</text>
+        <rect class="box" x="330" y="148" width="320" height="32" rx="6"/>
+        <text x="344" y="169">master key en .env met BETTER_AUTH_SECRET</text>
+        <rect class="box" x="330" y="188" width="320" height="32" rx="6"/>
+        <text x="344" y="209">het server-proces: /proc, kill, herstart</text>
+        <rect class="box" x="330" y="228" width="320" height="32" rx="6"/>
+        <text x="344" y="249">logins van Claude en Codex in /home/agent</text>
+        <rect class="box" x="330" y="268" width="320" height="32" rx="6"/>
+        <text x="344" y="289">WSM_MCP_TOKEN en de services van de sandbox</text>
+        <rect class="box" x="330" y="308" width="320" height="32" rx="6"/>
+        <text x="344" y="329">code in /workspace en de worktrees</text>
+
+        <rect class="grens" x="716" y="66" width="254" height="118" rx="14"/>
+        <text class="b" x="843" y="112" text-anchor="middle">sandbox van een</text>
+        <text class="b" x="843" y="128" text-anchor="middle">ander project</text>
+        <text class="sub" x="843" y="150" text-anchor="middle">eigen Linux-gebruiker en volumes</text>
+        <rect class="box" x="716" y="226" width="254" height="118" rx="14"/>
+        <text class="b" x="843" y="268" text-anchor="middle">wsm-API en Podman-sockets</text>
+        <text class="sub" x="843" y="288" text-anchor="middle">database en audit-log van wsm</text>
+        <text class="sub" x="843" y="306" text-anchor="middle">alleen voor manager en eigenaar</text>
+
+        <line class="arrow-deny" x1="672" y1="125" x2="714" y2="125" marker-end="url(#f6-ahd)"/>
+        <g transform="translate(692 125)"><circle class="x-bg" r="8"/><path class="x-line" d="M-3.5 -3.5 L3.5 3.5 M-3.5 3.5 L3.5 -3.5"/></g>
+        <text class="sub t-deny" x="692" y="152" text-anchor="middle">dicht</text>
+        <line class="arrow-deny" x1="672" y1="285" x2="714" y2="285" marker-end="url(#f6-ahd)"/>
+        <g transform="translate(692 285)"><circle class="x-bg" r="8"/><path class="x-line" d="M-3.5 -3.5 L3.5 3.5 M-3.5 3.5 L3.5 -3.5"/></g>
+        <text class="sub t-deny" x="692" y="312" text-anchor="middle">dicht</text>
+      </svg>
+    </div>
+    <figcaption><b>Figuur 6.</b> Binnen de sandbox kan elke agent bij alles van Paperclip. De groene wsm-grens houdt die schade binnen het project. Dat volgt de eis "bij een prompt-injectie reikt de schade nooit verder dan het eigen project".</figcaption>
+  </figure>
+  <div class="prose">
+    <ul>
+      <li><b>Eén company per project.</b> Wie de instantie raakt, raakt elke company erin.</li>
+      <li><b>Budgetten zijn te omzeilen.</b> Een agent kan de database aanpassen: PostgreSQL luistert op loopback met de vaste login <code>paperclip</code>/<code>paperclip</code>. Zet daarom een bestedingslimiet bij de LLM-aanbieder.</li>
+      <li><b>Run-sleutels zijn na te maken.</b> Agents erven <code>BETTER_AUTH_SECRET</code> uit de omgeving van de server, en Paperclip tekent de run-sleutels daarmee. Paperclip haalt alleen de <code>PAPERCLIP_*</code>-variabelen weg.</li>
+      <li><b>Exfiltratie is mogelijk.</b> Het internet staat open, dus een geïnjecteerde agent kan data naar buiten sturen. Dat is een bekende kanttekening in de eisen.</li>
+      <li><b>Vijandige invoer hoort in een eigen project.</b> Externe PR's en tickets horen in een eigen wsm-project met een eigen Paperclip, zonder waardevolle credentials (U2).</li>
+    </ul>
+  </div>
+</section>
+
+<!-- 10. Uitzonderingen -->
+<section class="block wrap" id="uitzonderingen">
+  <div class="head-group">
+    <p class="sec-label">10 · Grenzen van het ontwerp</p>
+    <h2>Wat niet kan, en waarom</h2>
+  </div>
+  <div class="prose">
+    <p>Negen dingen die Paperclip kan of wil, maar die binnen de regels van wsm niet lukken. Bij elk punt staat waarom en waar het botst. Oplossingen zijn bewust nog niet onderzocht.</p>
+  </div>
+  <div class="exc-legend">
+    <span class="pill dicht">botst met invarianten</span>
+    <span class="pill muted">ontwerp of eigenschap</span>
+    <span class="pill cond">fase 1, al gepland</span>
+  </div>
+  <div class="exc-grid">
+    <article class="exc">
+      <header><span class="id">U1</span><h3>Paperclip als orkestrator van andere sandboxes</h3><span class="tagrow"><span class="pill dicht">botst met invarianten</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>Runs elders draaien, via een <code>ssh</code>-omgeving, een sandbox-provider (Daytona, E2B, Kubernetes …) of de Runner. Een provider maakt sandboxes, draait er commando's in en synct bestanden.</dd>
+        <dt>Waarom niet</dt><dd>Sandboxes maakt alleen de eigenaar. De MCP heeft geen beheertools, en in een sandbox komt geen Podman-socket. Verkeer tussen sandboxes is dicht, en sandboxes hebben geen sshd.</dd>
+      </dl>
+      <p class="refs">aanname 4 · invariant 1, 2 · ADR 0001, 0002, 0005</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U2</span><h3>Insluiting van vijandige invoer</h3><span class="tagrow"><span class="pill dicht">volgt uit U1</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>De preset <code>low_trust_review</code> voor externe PR's en tickets. Die run start alleen met de <code>sandbox</code>-driver en <code>isolated_workspace</code>.</dd>
+        <dt>Waarom niet</dt><dd>Er is geen <code>sandbox</code>-driver, dus zulke runs weigeren te starten. De insluiting is dan die van wsm, per project.</dd>
+      </dl>
+      <p class="refs">doc/LOW-TRUST-PRESETS.md · U1</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U3</span><h3>Scheiding tussen agents en companies</h3><span class="tagrow"><span class="pill muted">eigenschap van Paperclip</span></span></header>
+      <dl>
+        <dt>Wat Paperclip biedt</dt><dd>Rollen, goedkeuringen, budgetten, data per company en sleutels per agent.</dd>
+        <dt>Waarom geen grens</dt><dd>Alles draait als UID 1000 in één container. Elke agent kan de database, de master key, <code>.env</code> en het serverproces lezen of aanpassen. PostgreSQL luistert op loopback met de vaste login <code>paperclip</code>/<code>paperclip</code>. Elke agent erft <code>BETTER_AUTH_SECRET</code>, en daarmee tekent hij zelf run-sleutels.</dd>
+      </dl>
+      <p class="refs">SANDBOX-REQUIREMENTS.md · docs/agents-runtime.md §9 · server/src/agent-auth-jwt.ts</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U4</span><h3>Een wsm-identiteit per agent</h3><span class="tagrow"><span class="pill muted">ontwerp van wsm</span></span></header>
+      <dl>
+        <dt>Wat je zou willen</dt><dd>Agent A krijgt wel een database, agent B niet, en de audit log toont welke agent wat deed.</dd>
+        <dt>Waarom niet</dt><dd>De identiteit komt alleen uit het MCP-token per sandbox, en alle agents erven dat. Grants gelden per sandbox, netwerktoegang per project-UID.</dd>
+      </dl>
+      <p class="refs">invariant 2 · ADR 0001, 0012, 0014</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U5</span><h3>Code naar buiten: push, PR's, merges</h3><span class="tagrow"><span class="pill cond">bewust · fase 2</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>Agents die branches pushen en PR's openen en mergen, met <code>gh</code> en een GitHub-token als secret.</dd>
+        <dt>Waarom niet</dt><dd>In de sandbox staan geen git-credentials. Code gaat alleen als bundle naar buiten, via de manager, met review en hersigneren. Dat is fase 2.</dd>
+      </dl>
+      <p class="refs">eisen "Git, review en signing" · ADR 0009, 0010 · TestNoCredentialsInSandbox</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U6</span><h3>Inkomende webhooks en chatkoppelingen</h3><span class="tagrow"><span class="pill muted">ontwerp van wsm</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>Webhooks voor Slack, Telegram, Teams en GitHub, voor e-mail, spraak en plugins, en routines die van buiten worden aangeroepen.</dd>
+        <dt>Waarom niet</dt><dd>De enige weg naar binnen is de preview. Zonder wsm-cookie krijgt een verzoek een redirect of een 401, en een externe dienst heeft geen passkey.</dd>
+        <dt>Wat wel werkt</dt><dd>Discord, want Paperclip houdt daarvoor zelf een uitgaande gateway-verbinding open. Waarschijnlijk ook iMessage via Photon.</dd>
+      </dl>
+      <p class="refs">ADR 0017 · invariant 10 · server/src/routes/chat-channels.ts</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U7</span><h3>Previews van wat de agents bouwen</h3><span class="tagrow"><span class="pill cond">fase-1-beperking</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>Dev-servers per workspace, gelinkt via <code>expose.urlTemplate</code>.</dd>
+        <dt>Waarom niet</dt><dd>Eén app-poort per project en één preview per sandbox. Die poort is hier het board. De app-poort ligt vast bij <code>project create</code>.</dd>
+      </dl>
+      <p class="refs">ADR 0017 punt 2 · docs/dashboard.md §5</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U8</span><h3>Rechten of containers in de sandbox</h3><span class="tagrow"><span class="pill dicht">botst met invarianten</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>Tailscale (<code>bind=tailnet</code>), Docker- en Podman-flows, de eigen Bubblewrap-opsluiting per run (<code>filesystemScope</code>), en software installeren tijdens het draaien.</dd>
+        <dt>Waarom niet</dt><dd>TUN en <code>NET_ADMIN</code> zijn weg door <code>cap-drop ALL</code>. Er is geen container-runtime en geen socket. Bubblewrap vraagt een geneste user namespace en een nieuwe <code>/proc</code>, en dat weigert de container waarschijnlijk. Er is geen root in de container. Een tweede inkomend pad hoort er niet.</dd>
+      </dl>
+      <p class="refs">invariant 1, 9 · plan 3.4 · ADR 0017</p>
+    </article>
+    <article class="exc">
+      <header><span class="id">U9</span><h3>Paperclip bijwerken</h3><span class="tagrow"><span class="pill cond">fase-1-beperking</span></span></header>
+      <dl>
+        <dt>Wat Paperclip wil</dt><dd>Vaak nieuwe versies (CalVer, bijv. <code>v2026.1023.0</code>), zonder werk te verliezen.</dd>
+        <dt>Waarom niet</dt><dd>Een project, en dus zijn Containerfile, is na het aanmaken niet te wijzigen. Bestaande sandboxes houden hun image, en sandboxes opnieuw aanmaken met behoud van code (aanname 9) is nog niet gebouwd.</dd>
+      </dl>
+      <p class="refs">ADR 0008 punt 8 · docs/guide/images.md · aanname 9</p>
+    </article>
+  </div>
+</section>
+
+<!-- 11. Stappen -->
+<section class="block wrap" id="stappen">
+  <div class="head-group">
+    <p class="sec-label">11 · Binnen het stramien</p>
+    <h2>Zo pakken we het op</h2>
+  </div>
+  <ol class="steps">
+    <li><div>
+      <h3>Spike <code>spikes/05-paperclip/</code></h3>
+      <p>Wegwerpcode met een <code>FINDINGS.md</code>, op een wegwerp-VM van <code>debian-13-public</code>, met het gescripte nepmodel en nooit met echte sleutels. Klaar als:</p>
+      <ul class="check">
+        <li>het image bouwt via <code>wsm project create --containerfile</code>, met alleen de Containerfile als context;</li>
+        <li>Paperclip start als 1000:1000 zonder capabilities, en PostgreSQL draait binnen de pids- en geheugenlimieten;</li>
+        <li>het board werkt via de preview, met login en live updates, en is zonder wsm-login onbereikbaar;</li>
+        <li>een <code>claude_local</code>-heartbeat draait in een worktree, roept de API aan via <code>127.0.0.1</code> en schakelt via de MCP MariaDB in;</li>
+        <li>een tweede sandbox van hetzelfde project draait een eigen instantie;</li>
+        <li>stop/start en verwijderen plus opnieuw aanmaken gedragen zich zoals de tabel in §7;</li>
+        <li>er gaat geen verkeer naar <code>telemetry.paperclip.ing</code>;</li>
+        <li>de server leest geen <code>.env</code> uit <code>/workspace</code>;</li>
+        <li>het geheugen, de pids en de schijf per gelijktijdige run zijn gemeten.</li>
+      </ul>
+    </div></li>
+    <li><div>
+      <h3>ADR, voorbeeld en docs</h3>
+      <p>Een ADR, bijvoorbeeld "Paperclip in a sandbox", <code>examples/paperclip/Containerfile</code> en een pagina in de docs.</p>
+    </div></li>
+    <li><div>
+      <h3>Isolatietests met het Paperclip-image</h3>
+      <p>De bestaande tests dekken de grenzen al: <code>TestPreview</code>, <code>TestOtherProjectPreviewPort</code>, <code>TestManagerAPINotReachable</code>, <code>TestNoPodmanSocketInSandbox</code> en <code>TestContainerHardening</code>. Een run met dit image laat zien dat ze ook hier gelden.</p>
+    </div></li>
+    <li><div>
+      <h3>De uitzonderingen als input</h3>
+      <p>U1 tot en met U9 zijn input voor besluiten in fase 2 en later. Nu bouwen we er niets voor.</p>
+    </div></li>
+  </ol>
+</section>
+
+<!-- 12. Vragen -->
+<section class="block wrap" id="vragen">
+  <div class="head-group">
+    <p class="sec-label">12 · Nog uit te zoeken</p>
+    <h2>Open vragen voor de spike</h2>
+  </div>
+  <ul class="questions">
+    <li><b>Hoe komt een preview-verbinding binnen?</b>Via pasta, als loopback of als extern adres. Dat bepaalt of <code>TRUST_PROXY</code> nodig is.</li>
+    <li><b>Secure-cookies achter de proxy</b>Zet Better Auth ze met alleen een expliciete https-<code>PAPERCLIP_PUBLIC_URL</code>?</li>
+    <li><b>Inloggen zonder lokale browser</b>Werken <code>claude login</code> en <code>codex login</code> met een code of device-flow in <code>wsm shell</code>?</li>
+    <li><b>PostgreSQL in een kale container</b>Draait PostgreSQL 18 met 64 MB <code>/dev/shm</code>, <code>cap-drop ALL</code> en de pids-limiet?</li>
+    <li><b>Chat zonder webhook</b>Werkt de Discord-gateway vanuit de sandbox, en verbindt de Photon-ontvanger alleen naar buiten (U6)?</li>
+    <li><b>Bubblewrap in de container</b>Faalt <code>filesystemScope</code> zoals verwacht, en met welke fout (U8)?</li>
+    <li><b>Route B</b>Werkt <code>npm install -g paperclipai</code> met <code>paperclipai run</code> als kleiner image?</li>
+  </ul>
+  <div class="prose">
+    <p>Al beantwoord uit de broncode, en uitgewerkt in <code>onderzoek-paperclip.md</code> (§4.7–§4.9 en U3): waar de worktrees staan, hoe de agent-CLI's hun login vinden en welke server-variabelen agents erven.</p>
+  </div>
+</section>
+
+</main>
+
+<footer class="wrap">
+  <p>De volledige uitwerking, met een bronverwijzing per claim, staat in <code>docs/plan/onderzoek-paperclip.md</code>. Gebaseerd op wsm <code>brief/v1</code> (<code>380c70e</code>) en Paperclip <code>master</code>, commit <code>7671e0cf0d71</code> (22 november 2026).</p>
+  <ul>
+    <li>wsm: <code>docs/plan/eisen-workspace-manager.md</code>, <code>docs/plan/bouwplan-fase-1.md</code>, ADR 0001–0018, <code>internal/sandbox/sandbox.go</code>, <code>internal/preview/preview.go</code>.</li>
+    <li>Paperclip: <a href="https://github.com/paperclipai/paperclip/blob/7671e0cf0d718351f3b0c4d6a7d33df9867ffb8a/doc/DEPLOYMENT-MODES.md">DEPLOYMENT-MODES.md</a>, <a href="https://github.com/paperclipai/paperclip/blob/7671e0cf0d718351f3b0c4d6a7d33df9867ffb8a/packages/plugins/sandbox-providers/SANDBOX-REQUIREMENTS.md">SANDBOX-REQUIREMENTS.md</a>, <a href="https://github.com/paperclipai/paperclip/blob/7671e0cf0d718351f3b0c4d6a7d33df9867ffb8a/docs/agents-runtime.md">agents-runtime.md</a>, <a href="https://github.com/paperclipai/paperclip/blob/7671e0cf0d718351f3b0c4d6a7d33df9867ffb8a/doc/LOW-TRUST-PRESETS.md">LOW-TRUST-PRESETS.md</a>, <a href="https://github.com/paperclipai/paperclip/blob/7671e0cf0d718351f3b0c4d6a7d33df9867ffb8a/Dockerfile">Dockerfile</a>, <a href="https://github.com/paperclipai/paperclip/blob/7671e0cf0d718351f3b0c4d6a7d33df9867ffb8a/server/src/runtime-api.ts">runtime-api.ts</a>.</li>
+    <li>Website en docs: <a href="https://paperclip.ing">paperclip.ing</a>.</li>
+  </ul>
+</footer>
+
+</body>
+</html>
