@@ -13,7 +13,7 @@ Guidance for Claude Code and other coding agents working in this repository.
 Read these before writing code. They are in Dutch.
 - `docs/plan/eisen-workspace-manager.md`: the confirmed requirements.
 - `docs/plan/bouwplan-fase-1.md`: the architecture and the phase 1 plan, including scope, repository layout (section 4), spikes, milestones and isolation tests.
-- `docs/plan/plan-paperclip.md`: the accepted plan for running wsm under Paperclip (24 November 2026). Its decisions are in §13.1 and §13.6.
+- `docs/plan/plan-paperclip.md`: the accepted plan for running wsm under Paperclip (24 November 2026). Its decisions are in §13.1, §13.6 and §13.7.
 - `docs/plan/onderzoek-bestaande-tools.md`: research into existing tools and what we reuse.
 - `docs/adr/`: architecture decisions, added as they are made.
 

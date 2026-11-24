@@ -1,6 +1,6 @@
 # Plan: Paperclip met de waarden van wsm
 
-Status: besloten op 24 november 2026. De eigenaar nam alle voorstellen uit §13.1 over. Spike S1 is klaar (`spikes/05-paperclip-provider/FINDINGS.md`); de besluiten daarna staan in §13.6.
+Status: besloten op 24 november 2026. De eigenaar nam alle voorstellen uit §13.1 over. De spikes S1 en S3 zijn klaar (`spikes/05-paperclip-provider/FINDINGS.md` en `spikes/06-tenant-api/FINDINGS.md`); de besluiten daarna staan in §13.6 en §13.7.
 
 Gebaseerd op:
 - de broncode van Paperclip op commit `cb4129a` (23 november 2026). Die is alleen gelezen, nooit uitgevoerd;
@@ -684,7 +684,7 @@ Alle spikes draaien op een wegwerp-VM, met het gescripte nepmodel en zonder echt
 
 | | Oplevering |
 |---|---|
-| P1 | Tenant-API met peer-identiteit, plafondcontrole en audit; helper-uitbreiding voor regiekamer-gebruikers |
+| P1 | Tenant-API met peer-identiteit, plafondcontrole en audit; helper-uitbreiding voor regiekamer-gebruikers; `/proc` met `hidepid=invisible` op de host (§13.7) |
 | P2 | Regiekamer als beheerd onderdeel: image, Quadlet, volume, egress, upgrades, en de CLI |
 | P3 | Provider-plugin met leases, exec en synchronisatie; images volgens het contract; een run van begin tot eind met het nepmodel |
 | P4 | Voordeur: boards en webhook-hosts; previews per sandbox |
@@ -700,7 +700,8 @@ Leg na de spikes elk besluit vast:
 - de provider-plugin en het leasemodel;
 - push-verzoeken;
 - de voordeur voor boards en webhooks;
-- secrets en LLM-toegang via Paperclip (vervangt de secret-store en de harnas-home per project).
+- secrets en LLM-toegang via Paperclip (vervangt de secret-store en de harnas-home per project);
+- `/proc` met `hidepid=invisible` op de host: wat het verbergt, wat het breekt, en wie een uitzondering krijgt (§13.7).
 
 ### 13.5 Nieuwe isolatietests
 
@@ -714,9 +715,12 @@ Leg na de spikes elk besluit vast:
 **Vanuit regiekamer A moet dit mislukken:**
 - een Podman-socket of een hostmap vinden;
 - een sandbox van project B maken, gebruiken of verwijderen;
-- het plafond wijzigen, een image buiten de allowlist gebruiken, of het maximum overschrijden;
+- het plafond wijzigen, een image buiten de allowlist gebruiken, of het maximum overschrijden. Sandboxes van de eigenaar tellen mee (§13.7);
 - uitgaand verkeer buiten de allowlist;
 - een run lokaal starten.
+
+**Als projectgebruiker of regiekamer-gebruiker op de host moet dit mislukken:**
+- de processen van een andere gebruiker zien in `/proc`, of hun argv lezen.
 
 **Vanaf het internet moet dit mislukken:**
 - het board bereiken zonder passkey-sessie;
@@ -745,6 +749,17 @@ De eigenaar besloot op 24 november 2026:
   4. *Duplex* staat standaard aan. Een terugval op de bestandsbridge telt als fout.
   5. *Geen voorverwarming.* Alleen de allereerste sandbox op een nieuwe host was traag.
 
+### 13.7 Besluiten na spike S3
+
+Spike S3 is klaar: go voor P1 (`spikes/06-tenant-api/FINDINGS.md`). De eigenaar besloot op 24 november 2026 over de twee open vragen:
+
+- **`/proc` op de host krijgt `hidepid=invisible`.**
+  - Waarom: S3 liet zien dat elke hostgebruiker de argv van processen in sandboxes kan lezen, ook die van andere projecten. Omgevingswaarden lekken niet.
+  - P1 zet het in de hostopzet, met een ADR en een isolatietest.
+  - Controleer eerst wat het breekt, bijvoorbeeld polkit of monitoring. Wie alle processen moet zien, krijgt een eigen groep via de mount-optie `gid=`.
+  - De manager kan het cgroup van een peer dan alleen lezen als hij in die groep zit. De extra controle op het cgroup uit S3 vraagt dat, of vervalt. De peer-check zelf (`SO_PEERCRED`) hangt er niet van af.
+- **Het maximum aantal sandboxes telt alle sandboxes van het project,** ook die de eigenaar met de CLI of het dashboard maakt. Zet het maximum dus hoger dan het aantal sandboxes dat de eigenaar zelf gebruikt.
+
 ## 14. Open vragen
 
 - Kan Paperclip workspace-services voor sandbox-omgevingen in de sandbox starten, in plaats van op de server? (E9)
@@ -753,7 +768,7 @@ De eigenaar besloot op 24 november 2026:
 - Hoe roept Paperclip git aan op bundles van agents: met hooks, fsmonitor en submodules uit?
 - Kan Paperclip een login van een vertrouwde proxy aannemen, zodat de dubbele login verdwijnt?
 - Hoe rendert het board Markdown van agents: zonder ruwe HTML?
-- Werkt `SO_PEERCRED` door rootless Podman heen met de juiste host-UID?
+- Werkt `SO_PEERCRED` door rootless Podman heen met de juiste host-UID? *Ja, met keep-id; zie `spikes/06-tenant-api/FINDINGS.md`.*
 - Hoeveel geheugen en opstarttijd kost een regiekamer per project?
 - Welke harnassen werken met de bridge over exec, en welke alleen met de native runner?
 

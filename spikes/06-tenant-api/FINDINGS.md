@@ -94,7 +94,9 @@ The rule "peer UID is exactly the control room user's UID" therefore admits
 every process of that Linux user, inside or outside the container. The Linux
 user is the boundary, so P2 must keep that user for the control room alone.
 The peer's cgroup names the container (`libpod-<id>.scope`). P1 can log it and,
-as a second check, compare it with the control room's container ID.
+as a second check, compare it with the control room's container ID. With
+`hidepid=invisible` (see the owner's decisions below), the manager can read
+the peer's cgroup only as a member of the exempt `gid=` group.
 
 **What S1 asked of S3** (`spikes/05-paperclip-provider/FINDINGS.md`):
 
@@ -221,8 +223,8 @@ depend on the image's `sh`, its `kill` builtin and coreutils' `timeout`:
 - The image is fixed to the project's image.
 - cpu, memory and pids must be at most the project's limits.
 - At most `max_sandboxes` sandboxes per project.
-- The spike counts every sandbox of the project, including the owner's.
-  (aangenomen)
+- `max_sandboxes` counts every sandbox of the project, including the ones the
+  owner makes with the CLI or the dashboard (the owner's decision below).
 
 **What the manager lacks today:**
 - `CreateSandbox` does not start the sandbox. P1 calls create and start
@@ -238,14 +240,18 @@ depend on the image's `sh`, its `kill` builtin and coreutils' `timeout`:
   already has `ExecCreate`, `ExecStart` with hijack and `demux`; P1 builds on
   those and on the `wsm-fs` exec mode.
 
-## Open questions for the owner
+## Owner's decisions (24 November 2026)
 
-1. **`/proc` on the host.** Every host user can read the argv of sandbox
-   processes (`argv-host`), and with it the argv of other projects. Env values
-   are not exposed. Should the host mount `/proc` with `hidepid=invisible`?
-   That hides other users' processes from each project user and from control
-   rooms. It is a host-wide change, so it needs an ADR and a check of what it
-   breaks.
-2. **Owner sandboxes and the ceiling.** Should sandboxes that the owner makes
-   with the CLI or the dashboard count toward a control room's
-   `max_sandboxes`? The spike counts them. (aangenomen)
+The owner answered both open questions with yes. Plan §13.7 records them.
+
+1. **`/proc` on the host gets `hidepid=invisible`.** Every host user can now
+   read the argv of sandbox processes (`argv-host`), including those of other
+   projects; env values are not exposed.
+   - P1 adds the mount option to the host setup, with an ADR and an isolation
+     test: a project user or control-room user must not see another user's
+     processes.
+   - First check what it breaks, such as polkit or monitoring. Whatever must
+     see every process gets a dedicated group through the `gid=` mount option.
+2. **Owner sandboxes count toward the ceiling.** `max_sandboxes` counts every
+   sandbox of the project, whatever made it, as this spike already does. An
+   owner who uses sandboxes of their own must set the maximum higher.
