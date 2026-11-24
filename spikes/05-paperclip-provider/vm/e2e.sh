@@ -259,7 +259,7 @@ check_secrets() {
 	else
 		res_sticky SECRETS-ARGV FAIL "watcher hits=$hits: $(grep '^hit ' "$OUT/watcher.txt" | tr '\n' ' ')"
 	fi
-	info "bridge-token-argv-$sc" "$(grep -E '^bridge-hit' "$OUT/watcher.txt" | sort -u -k3 | head -6 | tr '\n' ' ')$(grep -oE '^bridge-hits=[0-9]+' "$OUT/watcher.txt") (pclip uid=$(id -u pclip))"
+	info "bridge-token-argv-$sc" "$(grep -E '^bridge-hit ' "$OUT/watcher.txt" | sort -u -k3 | head -6 | tr '\n' ' ')$(grep -oE '^bridge-hits=[0-9]+' "$OUT/watcher.txt") (pclip uid=$(id -u pclip))"
 	journalctl -u s05-paperclip --no-pager -o cat | grep -F '[plugin]' | grep -qF -f "$SENTINEL_FILE" && sentinel_in_plugin=1
 	grep -rqF -f "$SENTINEL_FILE" "$RESULTS" && sentinel_in_results=1
 	if ((sentinel_in_plugin == 0 && sentinel_in_results == 0)); then
@@ -354,7 +354,8 @@ check_duplex() {
 	else
 		res BRIDGE-DUPLEX FAIL "duplex-opens=$opens fallback=${fallback:-none} bridge-me=$me issue-get=$get issue-patch=$patch"
 	fi
-	info duplex-lines "$(grep -oE 's05 duplex (exit|terminate|close|stderr|client|output) .{0,160}' "$OUT/plugin-log.txt" | head -6 | tr '\n' ' ')"
+	# Paperclip's journal lines wrap the message in colour codes and JSON; cut there.
+	info duplex-lines "$(grep -oP 's05 duplex (exit|terminate|close|stderr|client|output) [^\x1b{]{0,160}' "$OUT/plugin-log.txt" | head -6 | tr '\n' ' ')"
 	glog=$(as_pc git -C "$REPO" log --format=%s -5 | tr '\n' '|')
 	if run_ok && [[ $ISSUE_STATUS == done ]] && grep -q "S1 spike commit from the sandbox (duplex)" <<<"$glog"; then
 		res RESTORE-DUPLEX PASS "run succeeded, issue done, host git log: $glog"
