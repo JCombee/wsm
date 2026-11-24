@@ -103,6 +103,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		t.Fatal(err)
 	}
 	s := NewServer(cfg, aud, fa, log.New(io.Discard, "", 0))
+	s.ready = nil
 	return &testEnv{
 		s: s, admin: fa, auditPath: ap,
 		a: &tenantHandler{s: s, t: cfg.Tenants[0]},
