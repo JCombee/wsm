@@ -40,21 +40,24 @@ exit "$c"`
 // stopScript sends TERM to the exec's process group, then KILL after the
 // grace period. It prints none, gone, term or kill. The PID file is written
 // by the sandbox, which can only point it at its own processes.
+//
+// The group goes as "-PGID" right after the signal and never after "--":
+// dash's kill rejects "--", and the fallback then reached only timeout.
 const stopScript = `f=$1
 g=$2
 i=0
 while [ ! -s "$f" ] && [ "$i" -lt 30 ]; do sleep 0.1; i=$((i + 1)); done
 p=$(cat "$f" 2>/dev/null)
 case $p in ''|*[!0-9]*) echo none; exit 0;; esac
-kill -TERM -- "-$p" 2>/dev/null || kill -TERM "$p" 2>/dev/null || { echo gone; exit 0; }
+grp() { kill "-$1" "-$p" 2>/dev/null; }
+grp TERM || kill -TERM "$p" 2>/dev/null || { echo gone; exit 0; }
 i=0
-while [ "$i" -lt "$g" ]; do
-	kill -0 -- "-$p" 2>/dev/null || { echo term; exit 0; }
-	sleep 1
+while grp 0; do
+	if [ "$i" -ge $((g * 10)) ]; then grp KILL; echo kill; exit 0; fi
+	sleep 0.1
 	i=$((i + 1))
 done
-kill -KILL -- "-$p" 2>/dev/null
-echo kill`
+echo term`
 
 const (
 	stopGraceSeconds = 5
