@@ -37,6 +37,8 @@ CB=s06-cb
 UIDA=61001
 UIDB=61002
 SENTINELS=$STATE/sentinels
+# The scanners' stop file, where user test can see it too ($STATE is 0700).
+SCANSTOP=/run/s06-scan.stop
 mkdir -p "$RESULTS"
 chmod 0700 "$STATE"
 touch "$RESULTS/summary.txt"
@@ -356,15 +358,16 @@ phase_exec() {
 	export S06_SENTINEL_ENV S06_SENTINEL_ARGV
 	S06_NEEDLES="ENV:$S06_SENTINEL_ENV"$'\n'"ARGV:$S06_SENTINEL_ARGV"
 	export S06_NEEDLES
-	rm -f "$STATE/scan.stop"
-	"$TS" scan -stop "$STATE/scan.stop" -for 30m >"$RESULTS/scan-root.json" 2>&1 &
-	(cd / && runuser -u test -- "$TS" scan -stop "$STATE/scan.stop" -for 30m) >"$RESULTS/scan-test.json" 2>&1 &
+	rm -f "$SCANSTOP"
+	"$TS" scan -stop "$SCANSTOP" -for 30m >"$RESULTS/scan-root.json" 2>&1 &
+	(cd / && runuser -u test -- "$TS" scan -stop "$SCANSTOP" -for 30m) >"$RESULTS/scan-test.json" 2>&1 &
 	sleep 1
 
 	log "exec: scenario (about 6 minutes)"
 	client "$CA" "$PA" keepid exec >"$RESULTS/exec-a.jsonl" 2>"$RESULTS/exec-a.err"
-	touch "$STATE/scan.stop"
+	touch "$SCANSTOP"
 	wait
+	rm -f "$SCANSTOP"
 	unset S06_NEEDLES
 	record "$RESULTS/exec-a.jsonl"
 
