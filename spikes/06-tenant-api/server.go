@@ -410,23 +410,40 @@ func (h *tenantHandler) create(rc *reqCtx) {
 		writeJSON(rc.w, http.StatusBadGateway, apiError{"create failed"})
 		return
 	}
+	// wsm creates a sandbox without starting it; the tenant API hands out
+	// a running one.
+	if err := h.s.admin.SandboxAction(ctx, h.t.Project, id, "start"); err != nil {
+		h.s.log.Printf("project=%s sandbox=%s start: %v", h.t.Project, id, err)
+		h.discard(ctx, id)
+		writeJSON(rc.w, http.StatusBadGateway, apiError{"start failed"})
+		return
+	}
 	if h.s.ready != nil {
 		rctx, cancel := context.WithTimeout(ctx, readyTimeout)
 		err := h.s.ready(rctx, p, sb)
 		cancel()
 		if err != nil {
 			h.s.log.Printf("project=%s sandbox=%s not ready: %v", h.t.Project, id, err)
-			dctx, dcancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-			if derr := h.s.admin.DeleteSandbox(dctx, h.t.Project, id); derr != nil {
-				h.s.log.Printf("project=%s sandbox=%s cleanup: %v", h.t.Project, id, derr)
-			}
-			dcancel()
+			h.discard(ctx, id)
 			writeJSON(rc.w, http.StatusGatewayTimeout, apiError{"sandbox did not become ready"})
 			return
 		}
 	}
+	if fresh, ok, err := h.lookup(ctx, id); err == nil && ok {
+		sb = fresh
+	}
 	h.s.log.Printf("project=%s sandbox=%s created in %d ms", h.t.Project, id, time.Since(t0).Milliseconds())
 	writeJSON(rc.w, http.StatusCreated, toTenant(sb))
+}
+
+// discard deletes a sandbox that did not come up, also when the caller has
+// gone away.
+func (h *tenantHandler) discard(ctx context.Context, id string) {
+	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+	defer cancel()
+	if err := h.s.admin.DeleteSandbox(dctx, h.t.Project, id); err != nil {
+		h.s.log.Printf("project=%s sandbox=%s cleanup: %v", h.t.Project, id, err)
+	}
 }
 
 // listenTenant opens the project's socket. The directory must exist with

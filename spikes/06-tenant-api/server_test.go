@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,7 @@ type fakeAdmin struct {
 	sandboxes []Sandbox
 	created   []string
 	actions   []string
+	startErr  error
 }
 
 func (f *fakeAdmin) Project(_ context.Context, slug string) (Project, error) {
@@ -49,7 +52,8 @@ func (f *fakeAdmin) Sandboxes(_ context.Context, project string) ([]Sandbox, err
 func (f *fakeAdmin) CreateSandbox(_ context.Context, project, slug string) (Sandbox, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	sb := Sandbox{Project: project, Slug: slug, Status: "running", Pod: "wsm-" + project + "-" + slug, CreatedAt: time.Now()}
+	// Like wsm, create leaves the sandbox stopped.
+	sb := Sandbox{Project: project, Slug: slug, Status: "created", Pod: "wsm-" + project + "-" + slug, CreatedAt: time.Now()}
 	f.sandboxes = append(f.sandboxes, sb)
 	f.created = append(f.created, slug)
 	return sb, nil
@@ -59,6 +63,14 @@ func (f *fakeAdmin) SandboxAction(_ context.Context, project, slug, action strin
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.actions = append(f.actions, project+"/"+slug+"/"+action)
+	if action == "start" && f.startErr != nil {
+		return f.startErr
+	}
+	for i, sb := range f.sandboxes {
+		if sb.Project == project && sb.Slug == slug {
+			f.sandboxes[i].Status = map[string]string{"start": "running", "stop": "stopped"}[action]
+		}
+	}
 	return nil
 }
 
@@ -212,6 +224,36 @@ func TestCreateCeiling(t *testing.T) {
 	}
 }
 
+func TestCreateStartsTheSandbox(t *testing.T) {
+	e := newTestEnv(t)
+	rr := e.call(e.a, uidA, http.MethodPost, "/v1/tenant/sandboxes", `{}`)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create = %d %s", rr.Code, rr.Body)
+	}
+	var sb TenantSandbox
+	if err := json.Unmarshal(rr.Body.Bytes(), &sb); err != nil {
+		t.Fatal(err)
+	}
+	if sb.Status != "running" {
+		t.Fatalf("status = %q, want running", sb.Status)
+	}
+	if want := []string{"s06a/" + sb.ID + "/start"}; !slices.Equal(e.admin.actions, want) {
+		t.Fatalf("actions = %v, want %v", e.admin.actions, want)
+	}
+}
+
+func TestCreateDiscardsASandboxThatDoesNotStart(t *testing.T) {
+	e := newTestEnv(t)
+	e.admin.startErr = errors.New("pod start failed")
+	rr := e.call(e.a, uidA, http.MethodPost, "/v1/tenant/sandboxes", `{}`)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("create = %d %s, want 502", rr.Code, rr.Body)
+	}
+	if len(e.admin.created) != 1 || len(e.admin.sandboxes) != 0 {
+		t.Fatalf("created %v, left %v; want one created and none left", e.admin.created, e.admin.sandboxes)
+	}
+}
+
 func TestCreateCountsTheCeiling(t *testing.T) {
 	e := newTestEnv(t)
 	first := e.create(t, e.a, uidA)
@@ -228,6 +270,7 @@ func TestCreateCountsTheCeiling(t *testing.T) {
 func TestOtherTenantSandboxIsNotFound(t *testing.T) {
 	e := newTestEnv(t)
 	id := e.create(t, e.a, uidA)
+	actions := len(e.admin.actions)
 	random := "tzzzzzzzzzz"
 	for _, tc := range []struct{ method, suffix string }{
 		{http.MethodGet, ""}, {http.MethodDelete, ""}, {http.MethodPost, "/start"}, {http.MethodPost, "/stop"},
@@ -238,8 +281,8 @@ func TestOtherTenantSandboxIsNotFound(t *testing.T) {
 			t.Fatalf("%s %s: got %d %q, random id gives %d %q", tc.method, tc.suffix, got.Code, got.Body, ref.Code, ref.Body)
 		}
 	}
-	if len(e.admin.actions) != 0 {
-		t.Fatalf("actions ran: %v", e.admin.actions)
+	if len(e.admin.actions) != actions {
+		t.Fatalf("actions ran: %v", e.admin.actions[actions:])
 	}
 	rr := e.call(e.b, uidB, http.MethodGet, "/v1/tenant/sandboxes", "")
 	if strings.Contains(rr.Body.String(), id) {
