@@ -1,6 +1,6 @@
 # Plan: Paperclip met de waarden van wsm
 
-Status: voorstel, 23 november 2026. Er is nog niets gebouwd of getest.
+Status: besloten op 24 november 2026. De eigenaar nam alle voorstellen uit §13.1 over. Spike S1 is klaar (`spikes/05-paperclip-provider/FINDINGS.md`); de besluiten daarna staan in §13.6.
 
 Gebaseerd op:
 - de broncode van Paperclip op commit `cb4129a` (23 november 2026). Die is alleen gelezen, nooit uitgevoerd;
@@ -629,6 +629,8 @@ Elke afwijking hieronder beschrijft wat niet (helemaal) lukt, waarom niet, en wa
 
 ### 13.1 Besluiten voor de eigenaar
 
+De eigenaar nam op 24 november 2026 elk voorstel hieronder over.
+
 | | Besluit | Voorstel |
 |---|---|---|
 | B1 | De rollen omdraaien, met een regiekamer die sandboxes maakt binnen het plafond (aanname 4 aanpassen) | Ja |
@@ -721,6 +723,27 @@ Leg na de spikes elk besluit vast:
 - via de webhook-host iets anders bereiken dan een webhook-route.
 
 De bestaande tests blijven gelden, zoals `TestNoCredentialsInSandbox` en `TestManagerAPINotReachable`.
+
+### 13.6 Besluiten na spike S1
+
+De eigenaar besloot op 24 november 2026:
+
+- **Volgorde:** S3, S2, S4 en S5, daarna P1 tot en met P6. S3 gaat vóór S2, omdat de uitkomst van `SO_PEERCRED` door rootless Podman bepaalt hoe de container van de regiekamer moet draaien.
+- **Scope:** de onderdelen uit fase 2 die dit plan nodig heeft, horen nu bij de scope:
+  - push-verzoeken met review en hersigneren;
+  - step-up;
+  - goedkeuringen voor pushes en voor verzoeken buiten het plafond;
+  - een maximum aantal sandboxes in het plafond.
+- **Paperclip patchen mag,** met kleine, aparte patches in het regiekamer-image.
+  - Vooral om lokale uitvoering te blokkeren (E11), en waar een instelling niet genoeg is ook voor workspace-services en de GitHub-credential-route (§9).
+  - Elke patch wordt bij elke upgrade opnieuw getest.
+  - Een bijdrage aan Paperclip zelf doet de eigenaar.
+- **De open vragen uit S1:**
+  1. *Gecommitte symlink naar een hostpad:* S2 test dit met een eigen scenario. Lekt hij, dan blokkeert de provider of een patch het.
+  2. *Een geweigerd archief* kost de hele run (fail closed).
+  3. *Geheimen in de sandbox:* alleen wat de run echt nodig heeft, en nooit GitHub-tokens (B4). S2 bepaalt per naam wat blijft.
+  4. *Duplex* staat standaard aan. Een terugval op de bestandsbridge telt als fout.
+  5. *Geen voorverwarming.* Alleen de allereerste sandbox op een nieuwe host was traag.
 
 ## 14. Open vragen
 

@@ -1,6 +1,6 @@
 # Eisen: Development Workspace Manager (MCP)
 
-Status: bevestigd op 1 november 2026, na een grill-sessie.
+Status: bevestigd op 1 november 2026, na een grill-sessie. Bijgewerkt op 24 november 2026 met de besluiten over Paperclip (zie onderaan en `plan-paperclip.md`).
 
 ## Doel
 - Self-hosted systeem dat afgeschermde ontwikkelomgevingen (sandboxes) beheert, puur bedoeld voor AI-agents.
@@ -64,8 +64,8 @@ Status: bevestigd op 1 november 2026, na een grill-sessie.
 - Terminalsessies lopen server-side door (zoals bij tmux); opnieuw aansluiten kan vanaf elk apparaat.
 - Inloggen met een passkey, met TOTP als fallback. Step-up voor goedkeuren, pushen en secrets.
 - Meldingen via dashboard + Web Push, ntfy/Gotify, e-mail en chat (Telegram/Slack/Discord). Goedkeuren kan alleen in het dashboard.
-- Secret-store per project, die geheimen als env-variabelen of bestanden (bijv. auth.json) injecteert bij de start van een sandbox.
-- Harnas-home (met login) per project, gedeeld door de sandboxes van dat project.
+- Secret-store per project, die geheimen als env-variabelen of bestanden (bijv. auth.json) injecteert bij de start van een sandbox. *Vervallen: zie de besluiten over Paperclip.*
+- Harnas-home (met login) per project, gedeeld door de sandboxes van dat project. *Vervallen: zie de besluiten over Paperclip.*
 
 ## Resources en audit
 - CPU-, RAM- en schijflimieten per sandbox.
@@ -77,7 +77,7 @@ Status: bevestigd op 1 november 2026, na een grill-sessie.
 ## Aannames (bevestigd)
 2. Elke sandbox heeft een eigen MCP-endpoint. De projectidentiteit hangt aan de verbinding, nooit aan een tool-argument, en de MCP bevat geen beheertools.
 3. Een verzoek geeft 'pending' terug; de agent kan de status opvragen of erop wachten.
-4. Alleen de gebruiker maakt sandboxes aan en verwijdert ze. Bij verwijderen worden accounts, databases, indexen en vhosts opgeruimd; de remote branch blijft bestaan.
+4. De gebruiker maakt sandboxes aan en verwijdert ze. Binnen het plafond doet de regiekamer van het project dat ook, met audit (aangepast op 24 november 2026, besluit B1 in `plan-paperclip.md`). Bij verwijderen worden accounts, databases, indexen en vhosts opgeruimd; de remote branch blijft bestaan.
 5. De manager draait git met hooks en fsmonitor uitgeschakeld.
 6. Git werkt generiek via SSH of HTTPS met elke host; signeren kan met SSH of GPG.
 7. Het databaseprofiel staat op de eigen databases triggers, views en routines toe (nodig voor Magento).
@@ -91,6 +91,18 @@ Status: bevestigd op 1 november 2026, na een grill-sessie.
 - Zelf bouwen (open source); geen bestaande tool als basis.
 - Backend in Go. Frontend in TypeScript met Monaco en xterm.js; Vue 3 als framework is een voorstel, nog te bevestigen.
 - Het bouwplan voor fase 1 staat in `bouwplan-fase-1.md`.
+
+## Besluiten over Paperclip (24 november 2026)
+Het plan staat in `plan-paperclip.md`, met de besluiten in §13.1 en §13.6.
+- Paperclip wordt de regiekamer boven wsm (B1, B2).
+  - Er is één regiekamer per project, met een eigen gebruiker en container.
+  - Ze krijgt alleen de tenant-API van het eigen project.
+- De git-custody blijft bij wsm. Paperclips GitHub-functies staan uit (B4).
+- Goedkeuringen worden gesplitst:
+  - werk keurt de eigenaar goed in het board;
+  - het plafond en pushen keurt de eigenaar goed in wsm, met step-up.
+- Paperclips secrets en AI-verbindingen vervangen de secret-store en de harnas-home per project (B9, B10). Elke sandbox krijgt een eigen home.
+- Het dashboard is voor beheer. Het dagelijkse werk gebeurt in het board.
 
 ## Uitgesteld
 - Nog te kiezen: licentie (voorstel MIT), naam (voorstel "Sluis", nog te controleren) en installatie/distributie (voorstel in het bouwplan).
