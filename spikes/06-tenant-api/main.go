@@ -5,6 +5,7 @@
 //	tenantspike serve [-config /etc/s06/tenants.json]
 //	tenantspike client <scenario> [flags]
 //	tenantspike audit-verify <file>
+//	tenantspike scan [-stop file] [-for duration]
 //
 // This is throwaway spike code with its own module. Its host setup, a server
 // user in the groups wsm and wsm-admin, is a stand-in for the manager on a
@@ -29,6 +30,8 @@ func main() {
 		err = runClient(os.Args[2:])
 	case "audit-verify":
 		err = runAuditVerify(os.Args[2:])
+	case "scan":
+		err = runScan(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -40,7 +43,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Fprintln(os.Stderr, "usage: tenantspike serve [-config file] | client <scenario> [flags] | audit-verify <file>")
+	fmt.Fprintln(os.Stderr, "usage: tenantspike serve [-config file] | client <scenario> [flags] | audit-verify <file> | scan [-stop file]")
 }
 
 func runAuditVerify(args []string) error {
