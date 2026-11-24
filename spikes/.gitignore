@@ -3,3 +3,4 @@ runs/
 02-podman-api/podmanapi
 03-mcp/mcpspike
 04-passkeys/pkspike
+06-tenant-api/tenantspike
