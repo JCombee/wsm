@@ -1,6 +1,7 @@
 package main
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -58,5 +59,39 @@ func TestAuditInfoHasNoValues(t *testing.T) {
 	got := strings.Join(append([]string{info.Argv0}, info.EnvNames...), " ")
 	if strings.Contains(got, "SECRET") || info.Argc != 2 || got != "node A TOKEN" {
 		t.Fatalf("auditInfo = %+v", info)
+	}
+}
+
+func TestDropEnv(t *testing.T) {
+	deny := []string{"PAPERCLIP_GIT_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"}
+	tests := []struct {
+		name        string
+		env         map[string]string
+		deny        []string
+		wantDropped []string
+		wantLeft    []string
+	}{
+		{"nothing denied", map[string]string{"A": "1", "GH_TOKEN": "x"}, nil, nil, []string{"A=1", "GH_TOKEN=x"}},
+		{"no env", nil, deny, nil, []string{}},
+		{"drops and sorts", map[string]string{"GH_TOKEN": "x", "PAPERCLIP_GIT_TOKEN": "y", "A": "1"}, deny, []string{"GH_TOKEN", "PAPERCLIP_GIT_TOKEN"}, []string{"A=1"}},
+		{"exact names only", map[string]string{"gh_token": "x", "GH_TOKEN_X": "y"}, deny, nil, []string{"GH_TOKEN_X=y", "gh_token=x"}},
+		{"empty value is dropped too", map[string]string{"GITHUB_TOKEN": ""}, deny, []string{"GITHUB_TOKEN"}, []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := ExecSpec{Argv: []string{"env"}, Env: tt.env, TimeoutSeconds: 5}
+			dropped := s.dropEnv(tt.deny)
+			if strings.Join(dropped, ",") != strings.Join(tt.wantDropped, ",") {
+				t.Fatalf("dropped %q, want %q", dropped, tt.wantDropped)
+			}
+			if got := s.envList(); strings.Join(got, ",") != strings.Join(tt.wantLeft, ",") {
+				t.Fatalf("left %q, want %q", got, tt.wantLeft)
+			}
+			for _, d := range dropped {
+				if slices.Contains(s.auditInfo().EnvNames, d) {
+					t.Fatalf("audit still names the dropped %s as passed on", d)
+				}
+			}
+		})
 	}
 }

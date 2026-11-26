@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -372,4 +374,98 @@ func TestParseRoute(t *testing.T) {
 			t.Errorf("parseRoute(%s %s) = %q %q %d, want %q %q %d", tt.method, tt.path, route, id, status, tt.route, tt.id, tt.status)
 		}
 	}
+}
+
+// hijackRecorder lets the exec route take over one end of a net.Pipe, as it
+// does with a real connection.
+type hijackRecorder struct {
+	*httptest.ResponseRecorder
+	conn net.Conn
+}
+
+func (h *hijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
+}
+
+func TestExecDropsDeniedEnvBeforePodman(t *testing.T) {
+	e := newTestEnv(t)
+	e.a.t.EnvDeny = []string{"GH_TOKEN", "PAPERCLIP_GIT_TOKEN"}
+	id := e.create(t, e.a, uidA)
+	fs := newFakeStream()
+	fake := &fakeExecer{stream: fs}
+	e.s.podman = func(string) Execer { return fake }
+
+	const secret = "s06-denied-value"
+	body := `{"argv":["env"],"env":{"GH_TOKEN":"` + secret + `","PAPERCLIP_GIT_TOKEN":"` + secret + `","KEEP":"1"},"timeout_seconds":5,"stdin":false}`
+	req := httptest.NewRequest(http.MethodPost, "http://tenant/v1/tenant/sandboxes/"+id+"/exec", strings.NewReader(body))
+	req = req.WithContext(context.WithValue(req.Context(), peerKey{}, peerResult{peer: Peer{UID: uidA, PID: 4242}}))
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", execProtocol)
+	req.Header.Set("X-S06-Req", "req-env-deny")
+	server, client := net.Pipe()
+	defer client.Close()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.a.ServeHTTP(&hijackRecorder{httptest.NewRecorder(), server}, req)
+	}()
+	go fs.end(0)
+
+	br := bufio.NewReader(client)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("upgrade: %v %v", resp, err)
+	}
+	for {
+		typ, _, err := readFrame(br)
+		if err != nil {
+			t.Fatalf("no exit frame: %v", err)
+		}
+		if typ == frameExit {
+			break
+		}
+	}
+	client.Close()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("exec handler did not return")
+	}
+
+	fake.mu.Lock()
+	env := fake.cfg.Env
+	fake.mu.Unlock()
+	if !slices.Equal(env, []string{"KEEP=1"}) {
+		t.Fatalf("podman got env names %q, want only KEEP", envNames(env))
+	}
+	data, err := os.ReadFile(e.auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(data, []byte(secret)) {
+		t.Fatal("the audit holds a denied value")
+	}
+	var execLines int
+	for _, l := range e.auditLines(t) {
+		if l.Exec == nil {
+			continue
+		}
+		execLines++
+		if !slices.Equal(l.Exec.EnvNames, []string{"KEEP"}) || !slices.Equal(l.Exec.EnvDropped, []string{"GH_TOKEN", "PAPERCLIP_GIT_TOKEN"}) {
+			t.Fatalf("audit %s line: env_names %q env_dropped %q", l.Decision, l.Exec.EnvNames, l.Exec.EnvDropped)
+		}
+	}
+	if execLines != 2 {
+		t.Fatalf("audit has %d exec lines, want the allow line and the end line", execLines)
+	}
+}
+
+// envNames keeps only the names of a NAME=VALUE list, for failure messages.
+func envNames(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		out = append(out, name)
+	}
+	return out
 }

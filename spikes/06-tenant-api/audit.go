@@ -19,6 +19,7 @@ type ExecAudit struct {
 	Argv0          string   `json:"argv0"`
 	Argc           int      `json:"argc"`
 	EnvNames       []string `json:"env_names"`
+	EnvDropped     []string `json:"env_dropped,omitempty"`
 	TimeoutSeconds int      `json:"timeout_seconds"`
 	Stdin          bool     `json:"stdin"`
 	ExitCode       *int     `json:"exit_code,omitempty"`

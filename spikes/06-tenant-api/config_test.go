@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -32,6 +33,15 @@ func TestConfigValidate(t *testing.T) {
 		{"duplicate uid", func(c *Config) { c.Tenants[1].ControlRoomUID = 61001 }, "unique"},
 		{"duplicate dir", func(c *Config) { c.Tenants[1].SocketDir = c.Tenants[0].SocketDir }, "unique"},
 		{"no tenants", func(c *Config) { c.Tenants = nil }, "tenants"},
+		{"env_deny", func(c *Config) { c.Tenants[0].EnvDeny = []string{"GH_TOKEN", "GITHUB_TOKEN"} }, ""},
+		{"env_deny bad name", func(c *Config) { c.Tenants[0].EnvDeny = []string{"GH-TOKEN"} }, "env_deny"},
+		{"env_deny empty name", func(c *Config) { c.Tenants[0].EnvDeny = []string{""} }, "env_deny"},
+		{"env_deny repeated", func(c *Config) { c.Tenants[0].EnvDeny = []string{"GH_TOKEN", "GH_TOKEN"} }, "env_deny"},
+		{"env_deny too long", func(c *Config) {
+			for i := 0; i <= maxEnv; i++ {
+				c.Tenants[0].EnvDeny = append(c.Tenants[0].EnvDeny, fmt.Sprintf("N%d", i))
+			}
+		}, "env_deny"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

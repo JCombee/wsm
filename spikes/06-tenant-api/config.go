@@ -26,6 +26,10 @@ type TenantConfig struct {
 	MaxSandboxes int `json:"max_sandboxes"`
 	// MaxExecs caps concurrent exec sessions; zero means 32.
 	MaxExecs int `json:"max_execs,omitempty"`
+	// EnvDeny lists environment names that never reach a sandbox: the
+	// server removes them from every exec's environment before Podman
+	// sees it, and the audit names what it removed. Names match exactly.
+	EnvDeny []string `json:"env_deny,omitempty"`
 }
 
 // Config is the server's configuration.
@@ -105,6 +109,16 @@ func (c *Config) Validate() error {
 		}
 		if t.MaxExecs < 1 || t.MaxExecs > 256 {
 			return fmt.Errorf("tenant %s: max_execs must be 1 to 256", t.Project)
+		}
+		if len(t.EnvDeny) > maxEnv {
+			return fmt.Errorf("tenant %s: env_deny has more than %d names", t.Project, maxEnv)
+		}
+		denied := map[string]bool{}
+		for _, name := range t.EnvDeny {
+			if !envNameRE.MatchString(name) || denied[name] {
+				return fmt.Errorf("tenant %s: env_deny holds an invalid or repeated name", t.Project)
+			}
+			denied[name] = true
 		}
 		if projects[t.Project] || uids[t.ControlRoomUID] || dirs[t.SocketDir] {
 			return fmt.Errorf("tenant %s: project, uid and socket_dir must be unique", t.Project)

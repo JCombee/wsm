@@ -90,6 +90,20 @@ func (s *ExecSpec) Validate() error {
 	return nil
 }
 
+// dropEnv removes the denied names from the environment and returns the
+// names it removed, sorted. It never returns a value.
+func (s *ExecSpec) dropEnv(deny []string) []string {
+	var dropped []string
+	for _, name := range deny {
+		if _, ok := s.Env[name]; ok {
+			delete(s.Env, name)
+			dropped = append(dropped, name)
+		}
+	}
+	sort.Strings(dropped)
+	return dropped
+}
+
 // auditInfo is what the audit keeps of the spec.
 func (s *ExecSpec) auditInfo() *ExecAudit {
 	names := make([]string, 0, len(s.Env))

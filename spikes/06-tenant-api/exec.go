@@ -153,7 +153,10 @@ func (h *tenantHandler) exec(rc *reqCtx, id string) {
 		rc.deny(http.StatusBadRequest, "invalid exec spec: "+err.Error())
 		return
 	}
+	// The ceiling's env_deny applies before anything else sees the spec.
+	dropped := spec.dropEnv(h.t.EnvDeny)
 	rc.rec.Exec = spec.auditInfo()
+	rc.rec.Exec.EnvDropped = dropped
 	ctx := r.Context()
 	sb, ok, err := h.lookup(ctx, id)
 	switch {
