@@ -1,0 +1,24 @@
+{
+  "name": "s07-wsm-sandbox-provider",
+  "version": "0.1.0",
+  "description": "Spike 07: the wsm sandbox provider over wsm's tenant API, for a contained control room",
+  "private": true,
+  "type": "module",
+  "paperclipPlugin": {
+    "manifest": "./dist/manifest.js",
+    "worker": "./dist/worker.js"
+  },
+  "scripts": {
+    "build": "esbuild src/manifest.ts src/worker.ts --bundle --platform=node --format=esm --target=node24 --outdir=dist --packages=external",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "test": "node --test --test-reporter=tap test/*.test.ts"
+  },
+  "dependencies": {
+    "@paperclipai/plugin-sdk": "2026.1117.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "esbuild": "0.28.2",
+    "typescript": "7.0.2"
+  }
+}

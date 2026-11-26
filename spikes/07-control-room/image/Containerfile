@@ -1,0 +1,106 @@
+# Spike 07 control room: Paperclip with the wsm provider plugin baked in.
+# run.sh passes BASE as node:24-trixie-slim pinned by digest, and builds with
+# the spike directory as the context.
+
+ARG BASE
+
+# The plugin is built and tested here; only its output goes into the image.
+FROM ${BASE} AS plugin
+WORKDIR /build
+COPY plugin/package.json plugin/package-lock.json plugin/tsconfig.json ./
+RUN npm ci --no-audit --no-fund >npm-ci.log 2>&1 || { tail -30 npm-ci.log; exit 1; }
+COPY plugin/src ./src
+COPY plugin/test ./test
+# Typecheck and test results are recorded, not fatal: run.sh reports them as
+# PLUGIN-BUILD and PLUGIN-UNIT. The build itself must succeed.
+RUN set +e; \
+    npm run -s typecheck >typecheck.log 2>&1; tc=$?; \
+    npm test >test.tap 2>&1; tt=$?; \
+    set -e; \
+    npm run -s build >build.log 2>&1 || { cat build.log; exit 1; }; \
+    npm prune --omit=dev --no-audit --no-fund >/dev/null 2>&1; \
+    printf 'npm-ci=0 typecheck=%s build=0 test=%s\n' "$tc" "$tt" >status.txt
+
+FROM ${BASE}
+ARG BASE
+ARG PAPERCLIP_VERSION=2026.1117.0
+LABEL s07.base=${BASE} s07.paperclip=${PAPERCLIP_VERSION}
+ENV PAPERCLIP_TELEMETRY_DISABLED=1 \
+    DO_NOT_TRACK=1 \
+    NPM_CONFIG_UPDATE_NOTIFIER=false \
+    NPM_CONFIG_FUND=false \
+    LANG=C.UTF-8
+# git: Paperclip manages the project workspaces with it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+# npm 11 skips install scripts unless allowed; embedded-postgres needs its
+# postinstall (spike 05). A control room never runs a local agent (invariant
+# 12), so the native agent CLIs that Paperclip's package carries (about 2.1 GB,
+# codex and claude twice) are removed in the same step: they never reach a
+# layer, and the image fits a small machine. Each is an optional platform
+# package or a provider asset.
+RUN npm install -g --no-audit --no-fund --prefix /opt/paperclip \
+      --allow-scripts=@embedded-postgres/linux-x64,@paperclipai/server,ssh2,protobufjs \
+      "paperclipai@${PAPERCLIP_VERSION}" \
+ && npm cache clean --force \
+ && cd /opt/paperclip/lib/node_modules/paperclipai/node_modules \
+ && du -sm . | cut -f1 >/opt/paperclip/.s07-size-before-mib \
+ && rm -rf @openai/codex-linux-x64 @anthropic-ai/claude-agent-sdk-linux-x64 \
+      @anthropic-ai/claude-agent-sdk-linux-x64-musl @github/copilot-linux-x64 @cursor/sdk-linux-x64 \
+      opencode-linux-x64 opencode-linux-x64-baseline opencode-ai/bin/opencode.exe \
+      @paperclipai/server/node_modules/@openai/codex-linux-x64 \
+      @paperclipai/server/node_modules/@anthropic-ai/claude-agent-sdk-linux-x64 \
+      @paperclipai/server/provider-assets/copilot \
+ && du -sm . | cut -f1 >/opt/paperclip/.s07-size-after-mib \
+ && rm -rf /root/.npm /tmp/*
+# A managed instance starts every plugin worker with `--import` of the tsx
+# loader at the place Paperclip's own (monorepo) image keeps it: cli/ next to
+# the server package (server/src/services/bundled-plugin-runtime.ts). The npm
+# package keeps tsx under the server package instead, so its plugins fail with
+# "Managed plugin runtime loader is missing from the current image". This
+# copies tsx, and the esbuild it imports, to that place; Paperclip itself is
+# unchanged.
+RUN node -e ' \
+  const fs = require("node:fs"), path = require("node:path"); \
+  const scope = "/opt/paperclip/lib/node_modules/paperclipai/node_modules/@paperclipai"; \
+  const find = (name, from) => { \
+    for (let d = from; d !== path.dirname(d); d = path.dirname(d)) { \
+      const p = path.join(d, "node_modules", name); \
+      if (fs.existsSync(path.join(p, "package.json"))) return p; \
+    } \
+    throw new Error(name + " not found from " + from); \
+  }; \
+  const tsx = path.join(scope, "server/node_modules/tsx"); \
+  const esbuild = find("esbuild", tsx); \
+  const platform = find("@esbuild/linux-x64", esbuild); \
+  const dest = path.join(scope, "cli/node_modules"); \
+  for (const [from, to] of [[tsx, "tsx"], [esbuild, "esbuild"], [platform, "@esbuild/linux-x64"]]) \
+    fs.cpSync(from, path.join(dest, to), { recursive: true, dereference: true }); \
+  const v = (p) => JSON.parse(fs.readFileSync(path.join(p, "package.json"), "utf8")).version; \
+  console.log("tsx", v(tsx), "esbuild", v(esbuild), "from", path.relative(scope, esbuild)); \
+  ' >/opt/paperclip/.s07-tsx-loader.txt
+# The plugin is an image-owned bundle in Paperclip's distribution catalog
+# (PAPERCLIP_BUNDLED_PLUGIN_ROOT): Paperclip verifies it against the catalog's
+# digest at every boot and, on a managed instance, installs it itself
+# (`plugins.autoInstall`) and activates nothing else.
+COPY --from=plugin /build/package.json /opt/wsm-plugins/distribution/wsm/package.json
+COPY --from=plugin /build/dist /opt/wsm-plugins/distribution/wsm/dist
+COPY --from=plugin /build/node_modules /opt/wsm-plugins/distribution/wsm/node_modules
+COPY --from=plugin /build/test.tap /build/status.txt /build/typecheck.log /opt/wsm-build/
+COPY image/catalog.mjs /opt/wsm-build/catalog.mjs
+# The data volume mounts here. The node user (1000) owns it, so the volume
+# takes that owner on first use. A bundle may hold no symlinks (npm's .bin
+# links go), and the digest covers the file modes, so it is computed last.
+RUN install -d -o 1000 -g 1000 -m 0700 /paperclip \
+ && find /opt/wsm-plugins -type l -delete \
+ && chmod -R a-w /opt/wsm-plugins/distribution/wsm /opt/paperclip \
+ && node /opt/wsm-build/catalog.mjs /opt/wsm-plugins/distribution wsm wsm.s07-sandbox-provider wsm \
+      >/opt/wsm-build/catalog.txt \
+ && chmod -R a-w /opt/wsm-plugins /opt/wsm-build
+ENV PATH=/opt/paperclip/bin:/usr/local/bin:/usr/bin:/bin \
+    HOME=/paperclip \
+    PAPERCLIP_BUNDLED_PLUGIN_ROOT=/opt/wsm-plugins
+USER 1000:1000
+WORKDIR /paperclip
+CMD ["paperclipai", "onboard", "--yes", "--no-install-service", "-d", "/paperclip/pc"]

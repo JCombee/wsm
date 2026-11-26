@@ -4,3 +4,5 @@ runs/
 03-mcp/mcpspike
 04-passkeys/pkspike
 06-tenant-api/tenantspike
+07-control-room/plugin/node_modules/
+07-control-room/plugin/dist/
